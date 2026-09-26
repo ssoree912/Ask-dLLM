@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Run generation-based inference; the three multiple-choice tasks use OpenCompass.
-# Usage: scripts/run_eval.sh <dataset> <keep_ratio> [checkpoint]
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATASET="${1:?usage: run_eval.sh <dataset> <keep_ratio> [checkpoint]}"

@@ -1,3 +1,5 @@
+'Build prompt shards from non-test data for teacher extraction.'
+
 from __future__ import annotations
 
 import argparse, glob, json, os, sys

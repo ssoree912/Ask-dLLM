@@ -1,26 +1,8 @@
-"""MBPP scoring, reading local parquet and executing candidates locally.
-
-lm-eval's own ``tasks/mbpp/utils.py`` scores through ``evaluate.load("code_eval")``,
-which reaches the Hub at import time and refuses to import at all without
-HF_ALLOW_CODE_EVAL already set. Every other task here runs offline, so this uses
-the same guarded executor ``local_humaneval_utils`` uses and keeps the semantics
-identical -- candidate, newline, then that item's three asserts.
-
-``list_fewshot_samples`` is lm-eval's list verbatim (dumped from
-``lm_eval.tasks.mbpp.utils``), not a paraphrase: the three shots are part of the
-benchmark, and retyping them would quietly make this a different one.
-"""
-
 import math
 import os
 
 
 def _estimate_pass_at_k(total: int, correct: int, k: int) -> float:
-    """Same estimator as local_humaneval_utils, repeated rather than imported.
-
-    lm-eval loads a task's ``!function`` module by file path, not as part of a
-    package, so one task utils file cannot import another by name.
-    """
     if total < k:
         return 0.0
     if total - correct < k:
@@ -32,7 +14,6 @@ def _estimate_pass_at_k(total: int, correct: int, k: int) -> float:
 
 
 def pass_at_1(references, predictions) -> float:
-    """pass@1 for one item: run each candidate against that item's asserts."""
     if os.environ.get("HF_ALLOW_CODE_EVAL") != "1":
         raise RuntimeError("MBPP requires HF_ALLOW_CODE_EVAL=1")
 

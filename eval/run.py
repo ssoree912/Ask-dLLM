@@ -1,7 +1,3 @@
-"""lm-eval entry point that registers future_dllm's model first.
-
-    python eval/run.py --model LLaDA_future --model_args "..." --tasks local_gsm8k ...
-"""
 import sys
 from pathlib import Path
 

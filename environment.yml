@@ -4,6 +4,5 @@ dependencies:
   - python=3.10
   - pip
   - pip:
-      # The workspace driver exposes CUDA 12.2; use the compatible cu121 wheel.
       - --extra-index-url https://download.pytorch.org/whl/cu121
       - -r requirements.txt

@@ -1,5 +1,3 @@
-"""The Sparse-dLLM Dream decoding contract, shared by training and evaluation."""
-
 from dataclasses import asdict, dataclass
 import hashlib
 import os
@@ -7,6 +5,7 @@ import math
 
 
 DECODER_VERSION = "sparse_dllm_dream_v1"
+DEFAULT_DREAM_STEPS = 512
 
 
 @dataclass(frozen=True)
@@ -14,7 +13,7 @@ class DreamDecoding:
     alg: str = "entropy"
     temperature: float = 0.2
     top_p: float = 0.95
-    steps: int = 256
+    steps: int = DEFAULT_DREAM_STEPS
     eps: float = 1e-3
     top_k: int | None = None
     alg_temp: float | None = None
@@ -56,13 +55,6 @@ def add_dream_arguments(parser):
                             default=getattr(defaults, name))
 
 
-# Which knobs change what the labels *mean* versus which only shift the
-# trajectory they were sampled along. alg, steps and the implementation decide
-# the reveal schedule a label was recorded under, so a mismatch there makes the
-# label describe a different quantity. temperature and top_p move the sampled
-# continuation without changing the relationship the scorer learns -- whether a
-# scorer actually transfers across them is an empirical question, so it is
-# allowed only when asked for explicitly, and says so when it happens.
 SAMPLING_KEYS = ("temperature", "top_p", "top_k", "alg_temp")
 DRIFT_ENV = "FUTURE_DLLM_ALLOW_SAMPLING_DRIFT"
 
@@ -90,6 +82,5 @@ def require_matching_decoding(saved, expected, source):
 
 
 def sample_seed(seed, key):
-    """Make sampling independent of which preceding examples were resumed."""
     digest = hashlib.sha256(f"{seed}:{key}".encode()).digest()
     return int.from_bytes(digest[:8], "big") % (2**63 - 1)

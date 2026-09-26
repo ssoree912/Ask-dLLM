@@ -1,11 +1,3 @@
-"""Read a teacher run's generation budget out of the eval task it is training for.
-
-The teacher labels how much of the cache the finished answer needs, so the block
-schedule it labels has to be the one the evaluation actually decodes: the task's
-``generation_kwargs.max_gen_toks``, or lm-eval's own fallback when the task sets
-none. Reading it here keeps the two from drifting apart by hand.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,11 +7,8 @@ import yaml
 
 TASKS = Path(__file__).resolve().parent.parent / "eval" / "tasks"
 
-# lm-eval's HFLM.max_gen_toks, used for generative tasks that set no budget.
 DEFAULT_MAX_GEN_TOKS = 256
 
-# Which eval task each teacher dataset is training for, matching how
-# scripts/run_eval.sh routes the dataset name.
 DATASET_TASK = {
     "musique": "longbench/musique.yaml",
     "gov_report": "longbench/gov_report.yaml",
@@ -29,7 +18,6 @@ DATASET_TASK = {
     "math5s": "local/math.yaml",
 }
 
-# The MBPP training labels use a 256-token budget; evaluation uses 512.
 NO_TASK_BUDGET = {
     "mbpp_full": 256,
 }
@@ -42,7 +30,6 @@ def _load_yaml(path: Path) -> dict:
 
 
 def resolve(dataset: str) -> tuple[int, str]:
-    """Return (gen_length, where it came from) for a teacher dataset name."""
     if dataset in NO_TASK_BUDGET:
         return NO_TASK_BUDGET[dataset], "no eval task generates; repo default"
 

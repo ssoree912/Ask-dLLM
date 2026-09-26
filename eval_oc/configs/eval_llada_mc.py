@@ -1,4 +1,3 @@
-"""LLaDA: OpenCompass generation at 4096 total tokens and 32-token blocks."""
 from mmengine.config import read_base
 
 from eval_oc.llada_model import LLaDAFutureOC

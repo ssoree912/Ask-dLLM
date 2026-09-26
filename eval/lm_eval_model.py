@@ -1,9 +1,3 @@
-"""Generation-only lm-eval integration for LLaDA and Dream.
-
-ARC-Challenge, PIQA, and GPQA are evaluated with OpenCompass instead.
-The model family is detected from the checkpoint configuration.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -26,21 +20,10 @@ if str(REPO_ROOT) not in sys.path:
 
 
 def _generation_kwargs(raw: dict, default_max_gen_toks: int, dream_decoding=None) -> dict:
-    """Take the task's own generation settings and read them as diffusion ones.
-
-    Diffusion decoding needs its token budget up front, so the task's
-    ``max_gen_toks`` — or lm-eval's default when the task does not set one —
-    becomes the block schedule, one denoising step per token.
-
-    ``do_sample: false`` means greedy, which for Gumbel-max sampling is
-    temperature 0. Tasks pair it with ``temperature: 1``, meaning "unused";
-    taking that literally would sample.
-    """
     out = dict(raw)
     gen_length = int(out.get("gen_length", out.get("max_gen_toks", default_max_gen_toks)))
     out["gen_length"] = gen_length
     if dream_decoding is not None:
-        # Autoregressive task defaults must not override Dream's diffusion policy.
         out.update(dream_decoding.generation_kwargs(gen_length))
         return out
     out.setdefault("steps", gen_length)
@@ -62,7 +45,7 @@ class FutureDLLM(HFLM):
         dream_alg: str = "entropy",
         dream_temperature: float = 0.2,
         dream_top_p: float = 0.95,
-        dream_steps: int = 256,
+        dream_steps: int = 512,
         dream_seed: int = 0,
         show_speed: bool = True,
         **kwargs,
@@ -162,7 +145,6 @@ class FutureDLLM(HFLM):
     def generate_until(self, requests: List[Instance], disable_tqdm: bool = False) -> List[str]:
         from tqdm import tqdm
 
-        # Persist each answer so interrupted evaluations can resume.
         store_path = os.environ.get("FUTURE_DLLM_RESUME", "")
         done, store = {}, None
         if store_path:
@@ -172,7 +154,7 @@ class FutureDLLM(HFLM):
                         try:
                             rec = json.loads(line)
                         except json.JSONDecodeError:
-                            continue          # a line the crash cut in half
+                            continue
                         done[rec["key"]] = rec["text"]
             os.makedirs(os.path.dirname(store_path) or ".", exist_ok=True)
             store = open(store_path, "a")
@@ -195,7 +177,7 @@ class FutureDLLM(HFLM):
                 continue
             gen_kwargs = _generation_kwargs(raw_kwargs, self.max_gen_toks, self._dream_decoding)
             gen_length = int(gen_kwargs["gen_length"])
-            if gen_length % self._block_len:      # blocks have to divide the budget
+            if gen_length % self._block_len:
                 gen_length += self._block_len - gen_length % self._block_len
 
             if self.add_bos_token:

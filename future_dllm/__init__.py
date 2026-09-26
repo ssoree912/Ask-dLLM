@@ -1,16 +1,3 @@
-"""future_dllm — KV cache eviction for diffusion LLMs, driven by future attention.
-
-Standalone package: lm-eval imports this directly, no OpenCompass dependency.
-
-Two backends share one eviction implementation (``cache.CustomCache``) and one
-scorer (``student_cache.PromptUtilityStudent``):
-
-  * LLaDA  — ``modeling_llada`` / ``llada_generate``
-  * Dream  — ``modeling_dream`` / ``dream_generate``
-
-``backends.load_model`` picks between them from the checkpoint's ``model_type``,
-so the teacher and student scripts never branch on the family themselves.
-"""
 from .cache import (CustomCache, sparse_dllm_current_score,
                     teacher_current_attention_score)
 from .modeling_llada import LLaDAModelLM

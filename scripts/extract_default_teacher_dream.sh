@@ -1,45 +1,27 @@
 #!/usr/bin/env bash
-# Build prompts and extract the default five-domain teacher labels, on Dream.
-#
-# Separate artifact roots from the LLaDA run on purpose. Dream tokenises with a
-# Qwen2 chat template, so its prompt shards have different ids and lengths for
-# the same sample, and the resume check in build_prompt_shards only compares
-# lengths -- pointed at the LLaDA root it would silently accept LLaDA shards.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${PY:-python}"
 source "$REPO/scripts/dream_decoding_env.sh"
-# Dream uses a 2048-token total budget, including generation.
-#
-# DATASETS / LIMITS / PER_HEAD / TEACHER_ROOT are overridable, so a per-head run
-# on a subset does not need a second copy of this script:
-#
-#   PER_HEAD=1 LIMITS="250 185 75 50 250" \
-#     TEACHER_ROOT=$PWD/artifacts/teacher_dream_perhead \
-#     scripts/extract_default_teacher_dream.sh
 MAX_SEQ_LEN=2048
 MODEL="${FUTURE_DLLM_MODEL:-$REPO/model/Dream-v0-Instruct-7B}"
 DATA_ROOT="${FUTURE_DLLM_DATA:-$REPO/data}"
 PROMPT_ROOT="${PROMPT_ROOT:-$REPO/artifacts/prompt_shards_dream_${MAX_SEQ_LEN}}"
-TEACHER_ROOT="${TEACHER_ROOT:-$REPO/artifacts/teacher_dream_${MAX_SEQ_LEN}_${DREAM_DECODER_TAG}}"
+TEACHER_ROOT="${TEACHER_ROOT:-$REPO/artifacts/teacher_dream_${MAX_SEQ_LEN}_per_head_${DREAM_DECODER_TAG}}"
 RUN_TAG="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="${LOG_FILE:-$REPO/logs/teacher_extract/extract_default_teacher_dream_${RUN_TAG}.log}"
 
 read -r -a DATASETS <<< "${DATASETS:-math5s mbpp_full gov_report multi_news musique}"
 read -r -a LIMITS <<< "${LIMITS:-500 371 150 100 500}"
-# Head-averaged labels force one kept set per layer; --per-head keeps the axis
-# so each head can keep its own. On Dream that axis is the KV head axis (4, not
-# the 28 query heads): the cache holds one entry per KV head, so that is the
-# finest granularity eviction can act on. 4x the storage, hence its own root.
-PER_HEAD_ARGS=()
-[ -n "${PER_HEAD:-}" ] && PER_HEAD_ARGS=(--per-head)
-# How the block's rows, and the query heads sharing a KV entry, are folded into
-# the label. max is what the label shipped with; mean is the alternative the
-# row/group diagnostic argues for. Each writes its own teacher_kind, so the
-# resume check refuses to mix them in one root.
+PER_HEAD="${PER_HEAD:-1}"
+case "$PER_HEAD" in
+  1) PER_HEAD_ARGS=(--per-head) ;;
+  0) PER_HEAD_ARGS=(--no-per-head) ;;
+  *) echo "PER_HEAD must be 0 or 1" >&2; exit 2 ;;
+esac
 REDUCE_ARGS=(--label-row-reduce "${LABEL_ROW_REDUCE:-max}"
-             --label-group-reduce "${LABEL_GROUP_REDUCE:-max}")
+             --label-group-reduce "${LABEL_GROUP_REDUCE:-mean}")
 
 export FUTURE_DLLM_DATA="$DATA_ROOT"
 source "$REPO/scripts/runtime_env.sh"
@@ -49,7 +31,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 printf 'default teacher extraction (dream)\nmodel=%s\ndata=%s\nprompts=%s\nteacher=%s\nmax_seq_len=%s\nper_head=%s\nreduce=row:%s group:%s\ndatasets=%s\nlimits=%s\ngpu=%s\nlog=%s\n' \
   "$MODEL" "$DATA_ROOT" "$PROMPT_ROOT" "$TEACHER_ROOT" "$MAX_SEQ_LEN" \
-  "${PER_HEAD:-0}" "${LABEL_ROW_REDUCE:-max}" "${LABEL_GROUP_REDUCE:-max}" \
+  "$PER_HEAD" "${LABEL_ROW_REDUCE:-max}" "${LABEL_GROUP_REDUCE:-mean}" \
   "${DATASETS[*]}" "${LIMITS[*]}" \
   "$CUDA_VISIBLE_DEVICES" "$LOG_FILE"
 

@@ -41,6 +41,9 @@ export OC_PYTHON="$PWD/.venv-oc/bin/python"
 
 Total length (prompt + generation): **LLaDA 4096**, **Dream 2048**. Block length: **32**.
 
+Scoring is per KV head: **LLaDA 32**, **Dream 4**; GQA query heads are averaged within each KV group.
+Denoising steps: **LLaDA = generation length**, **Dream = min(512, generation length)**. Dream uses a floor-based reveal schedule, not exactly one finalized token per step.
+
 [LongBench](https://huggingface.co/datasets/zai-org/LongBench/tree/main) provides the first four rows below.
 
 | Dataset | Generation length |
@@ -99,12 +102,12 @@ Train on one dataset:
 ```bash
 python student/train_student.py \
   --model model/LLaDA-8B-Instruct \
-  --teacher-root artifacts/teacher/math5s \
+  --teacher-root artifacts/teacher_per_head/math5s \
   --max-seq-len 4096 --block-length 32
 
 python student/train_student.py \
   --model model/Dream-v0-Instruct-7B \
-  --teacher-root artifacts/teacher_dream_2048_sparse_v1_entropy_t0.2_p0.95_s256_seed0/math5s \
+  --teacher-root artifacts/teacher_dream_2048_per_head_sparse_v1_entropy_t0.2_p0.95_s512_seed0/math5s \
   --max-seq-len 2048 --block-length 32
 ```
 

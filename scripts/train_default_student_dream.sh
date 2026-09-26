@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
-# Train the default student on Dream teacher labels, using every natural block.
-#
-# --model has to be the same checkpoint the labels came from: the trainer
-# replays the selection-time forward to recover the hidden states the scorer
-# reads, so a different backend would train on states deployment never sees.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${PY:-python}"
 source "$REPO/scripts/dream_decoding_env.sh"
-# Dream uses a 2048-token total budget, including generation.
 MAX_SEQ_LEN=2048
 MODEL="${FUTURE_DLLM_MODEL:-$REPO/model/Dream-v0-Instruct-7B}"
-TEACHER_ROOT="${TEACHER_ROOT:-$REPO/artifacts/teacher_dream_${MAX_SEQ_LEN}_${DREAM_DECODER_TAG}}"
+TEACHER_ROOT="${TEACHER_ROOT:-$REPO/artifacts/teacher_dream_${MAX_SEQ_LEN}_per_head_${DREAM_DECODER_TAG}}"
 EPOCHS="${EPOCHS:-10}"
 LR="${LR:-2e-4}"
 SEED="${SEED:-0}"
@@ -22,9 +16,6 @@ MLP_DIM="${MLP_DIM:-512}"
 PAIRS="${PAIRS:-4096}"
 BLOCK_LENGTH=32
 RUN_TAG="$(date +%Y%m%d_%H%M%S)"
-# Empty means "use every shard in the root". A teacher root built at a reduced
-# sample count already holds exactly what should be trained on, and the trainer
-# refuses a cap larger than what exists, so the cap has to be droppable.
 MAX_SHARDS="${MAX_SHARDS-500,371,150,100,500}"
 SAMPLE_TAG="${SAMPLE_TAG:-${MAX_SHARDS//,/-}}"
 RUN_NAME="${RUN_NAME:-dream_${DREAM_DECODER_TAG}_5ds${SAMPLE_TAG:+_$SAMPLE_TAG}_e${EPOCHS}_lr${LR}_len${MAX_SEQ_LEN}_${RUN_TAG}}"

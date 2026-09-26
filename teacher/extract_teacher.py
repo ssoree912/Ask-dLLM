@@ -1,33 +1,3 @@
-"""Teacher labels from the finished answer: final x row-max.
-
-For each block the extractor lets the block fill in without eviction, then
-runs one extra forward on the completed block and reads what those answer tokens
-attend to. The label is the per-candidate maximum over the block's rows
-
-    I_j = max_r a_rj          a_rj = softmax_j (q_r . k_j / sqrt(d)), head-averaged
-
-so a candidate survives if *any* finished token needed it strongly. Taking the
-maximum rather than the sum is what makes the label usable: summing averages away
-the one token that depended on a given cache entry.
-
-Stored per (sample, block): the label [n_layers, n_candidates], the exact model
-input at the block's step-1 so the scorer's features can be replayed at training
-time without keeping hidden states, and the candidate index set.
-
-Shared implementation -- not runnable on its own. Use the family entry points:
-
-    teacher/extract_teacher_llada.py --model model/LLaDA-8B-Instruct --dataset ...
-    teacher/extract_teacher_dream.py --model model/Dream-v0-Instruct-7B --dataset ...
-
-Each pins one family and refuses a checkpoint from the other, so a run cannot
-silently label with the wrong model. The label itself lives here and is shared:
-one extra forward on the completed block, per-candidate row-max over the block's
-rows, over a candidate pool that is the block's complement for both families
-(and so the same pool the Sparse-dLLM baseline scores). LLaDA and Dream differ
-only in the mask token, Dream's autoregressive logit shift, and whether step 0
-seeds the block's first token -- see future_dllm/backends.py.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -56,7 +26,8 @@ def parse_args(family, description):
     p.add_argument("--dataset", required=True,
                    help="prompt shard directory name, e.g. math5s / mbpp_full / musique")
     p.add_argument("--shard-root", default=str(REPO_ROOT / "artifacts" / "prompt_shards"))
-    p.add_argument("--output-root", default=str(REPO_ROOT / "artifacts" / "teacher"))
+    p.add_argument("--output-root", default=str(REPO_ROOT / "artifacts" /
+                   ("teacher_per_head" if family == "llada" else "teacher_dream_per_head")))
     p.add_argument("--n-samples", type=int, default=300)
     p.add_argument("--gen-length", type=int, default=None,
                    help="default: the eval task's max_gen_toks, see teacher/gen_length.py")
@@ -70,10 +41,10 @@ def parse_args(family, description):
                    help="how the block's rows become one number per candidate. "
                         "max is what the label shipped with: a candidate "
                         "survives if any finished token needed it")
-    p.add_argument("--label-group-reduce", choices=("max", "mean"), default="max",
+    p.add_argument("--label-group-reduce", choices=("max", "mean"), default="mean",
                    help="how the query heads sharing a KV entry are folded, on "
                         "a GQA backend. Ignored when --per-head is off")
-    p.add_argument("--per-head", action="store_true",
+    p.add_argument("--per-head", action=argparse.BooleanOptionalAction, default=True,
                    help="label every attention head separately instead of "
                         "averaging them. Needed for per-head eviction, where "
                         "each head keeps its own top-k; costs H times the "
@@ -83,9 +54,6 @@ def parse_args(family, description):
     add_dream_arguments(p)
     args = p.parse_args()
 
-    # Refuse a checkpoint from the other family outright. Without this a Dream
-    # path handed to the LLaDA entry point would just load as Dream and write
-    # labels that look fine and belong to the wrong model.
     from future_dllm import detect_family
     found = detect_family(args.model)
     if found != family:
@@ -126,12 +94,11 @@ def collect(model, prompt_ids, args, backend):
     from future_dllm import CustomCache, add_gumbel_noise, get_num_transfer_tokens
 
     device = model.device
-    # Reserve generation space and left-truncate the prompt as in evaluation.
     prompt_ids = prompt_ids[-args.prompt_limit:].to(device).unsqueeze(0)
     P = prompt_ids.shape[1]
     G, B = args.gen_length, args.block_length
     n_blocks = G // B
-    S = args.gen_length // n_blocks          # steps per block == block length
+    S = args.gen_length // n_blocks
     L, MASK_ID = backend.n_layers, backend.mask_id
 
     x = torch.full((1, P + G), MASK_ID, dtype=torch.long, device=device)
@@ -140,7 +107,7 @@ def collect(model, prompt_ids, args, backend):
 
     for block in range(n_blocks):
         cache = CustomCache(n_layers=L, device=device, keep_ratio=1.0)
-        cache.collect_pool = True             # keep the whole pool, in candidate order
+        cache.collect_pool = True
         bs, be = P + block * B, P + (block + 1) * B
         ntt = get_num_transfer_tokens(x[:, bs:be] == MASK_ID, S)
 
@@ -150,8 +117,6 @@ def collect(model, prompt_ids, args, backend):
             m = (inp == MASK_ID)
             logits = model(inp, bs, state, cache).logits
             if backend.logit_shift:
-                # Dream row r predicts token r+1; move each row onto the position
-                # it describes, exactly as Dream's own generation_utils does.
                 logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
             x0 = torch.argmax(add_gumbel_noise(logits, 0.0), dim=-1)
             conf = torch.squeeze(torch.gather(F.softmax(logits, -1), -1,
@@ -162,32 +127,20 @@ def collect(model, prompt_ids, args, backend):
             x0 = torch.where(m, x0, tgt)
             conf = torch.where(m, conf, torch.full_like(conf, -float("inf")))
             if state == 0 and backend.seed_block_start:
-                # The block's first token is only readable on a full forward
-                # under the shift, so it is confirmed here. +inf heads this
-                # step's top-k rather than adding a reveal: the budget is
-                # unchanged, only which token it spends its first pick on.
                 conf[:, bs] = float("inf")
             keep = torch.topk(conf[0], k=ntt[0, i]).indices
             tgt[0, keep] = x0[0, keep]
 
-        # Step 1 runs forward, prunes, and only then reveals, so the state the
-        # scorer sees at selection time is the one *entering* step 1 - after
-        # step 0's reveal, before step 1's. Cloning after step(1) would hand
-        # training one revealed token more than deployment ever has.
         step(0)
-        x_at_block_start = x.clone()          # the scorer's input at selection time
+        x_at_block_start = x.clone()
         step(1)
         for i in range(2, S):
             step(i)
 
-        # One more forward on the completed block: all rows are real tokens now.
         cache.capture_rows = True
-        cache.capture_per_head = bool(getattr(args, "per_head", False))
-        cache.group_reduce = getattr(args, "label_group_reduce", "max")
+        cache.capture_per_head = bool(getattr(args, "per_head", True))
+        cache.group_reduce = getattr(args, "label_group_reduce", "mean")
         step(S - 1)
-        # Per head the rows arrive as [heads, block rows, candidates], so the
-        # max that turns rows into a label moves one axis right and the result
-        # keeps its head axis: [layers, heads, candidates].
         row_axis = 1 if cache.capture_per_head else 0
         row_reduce = getattr(args, "label_row_reduce", "max")
         label = torch.stack([
@@ -197,18 +150,12 @@ def collect(model, prompt_ids, args, backend):
         cache.pending_rows.clear()
         cache.capture_rows = False
 
-        # Candidates are everything outside the block, in cache order -- exactly
-        # what CustomCache.filter_cache keeps, so the label columns line up with
-        # the entries the student will score.
         candidates = torch.cat([torch.arange(bs, device=device),
                                 torch.arange(be, x.shape[1], device=device)])
         record = {
             "block_index": block,
             "block_start": int(bs),
             "block_length": B,
-            # The window the cache was cut around; the student conditions on it.
-            # Identical to the block for both backends today, and recorded
-            # explicitly so a future backend that widens it stays readable.
             "window_start": int(bs),
             "window_length": int(B),
             "seed_block_start": bool(backend.seed_block_start),
@@ -226,17 +173,6 @@ def collect(model, prompt_ids, args, backend):
 
 @torch.no_grad()
 def reduce_rows(rows: torch.Tensor, axis: int, how: str) -> torch.Tensor:
-    """Turn the block's rows into one number per candidate.
-
-    ``max`` is what the label shipped with -- a candidate survives if any
-    finished token needed it strongly -- and the argument for it is that a
-    position one row depended on is erased by a mean. Measured over four blocks
-    that is not what happens: the worst row keeps the same share of its own
-    attention under either rule (within 0.01), while max retains ~2 points less
-    total mass and leaves a visibly flatter label, which is what the student is
-    then fit to. Both are selectable so the claim can be tested rather than
-    argued.
-    """
     if how == "max":
         return rows.max(dim=axis).values
     if how == "mean":
@@ -245,7 +181,6 @@ def reduce_rows(rows: torch.Tensor, axis: int, how: str) -> torch.Tensor:
 
 
 def collect_dream(model, prompt_ids, args, backend):
-    """Use the deployment decoder; observing completed attention consumes no RNG."""
     from future_dllm.dream_decoding import DreamDecoding
     from future_dllm.dream_generate import generate
 
@@ -253,9 +188,9 @@ def collect_dream(model, prompt_ids, args, backend):
     prompt = prompt_ids[-args.prompt_limit:].to(model.device).unsqueeze(0)
     records = []
 
-    per_head = bool(getattr(args, "per_head", False))
+    per_head = bool(getattr(args, "per_head", True))
     row_reduce = getattr(args, "label_row_reduce", "max")
-    group_reduce = getattr(args, "label_group_reduce", "max")
+    group_reduce = getattr(args, "label_group_reduce", "mean")
 
     def completed(x, cache, block_index, bs, selection_input):
         be = bs + args.block_length
@@ -266,9 +201,6 @@ def collect_dream(model, prompt_ids, args, backend):
               customcache=cache, attention_mask="full")
         cache.capture_rows = False
         rows = [cache.pending_rows[layer] for layer in range(backend.n_layers)]
-        # Per head a row arrives as [kv heads, block rows, candidates], so the
-        # max that turns rows into a label moves one axis right and the head
-        # axis survives it: [layers, kv heads, candidates].
         row_axis = 1 if per_head else 0
         label = torch.stack([reduce_rows(row, row_axis, row_reduce) for row in rows])
         candidates = torch.cat([torch.arange(bs), torch.arange(be, x.shape[1])])
@@ -295,15 +227,11 @@ def collect_dream(model, prompt_ids, args, backend):
 
 
 def run(family, description):
-    """Entry point body, called by the two family scripts."""
     process_started = time.time()
     sys.path.insert(0, str(REPO_ROOT))
     args = parse_args(family, description)
     from future_dllm import load_model
 
-    # keep_ratio=1.0: the teacher labels the whole candidate pool, so nothing is
-    # evicted while it runs. load_model injects block_len and keep_ratio onto
-    # the config, which is what the patched attention reads at selection time.
     model, backend = load_model(args.model, max_seq_len=args.max_seq_len,
                                 block_length=args.block_length, keep_ratio=1.0)
     if args.max_seq_len > backend.native_max_seq_len:
@@ -319,9 +247,9 @@ def run(family, description):
         decoding = DreamDecoding.from_args(args).metadata()
         print(f"decoding={decoding} seed={args.seed}", flush=True)
 
-    per_head = bool(getattr(args, "per_head", False))
+    per_head = bool(getattr(args, "per_head", True))
     row_reduce = getattr(args, "label_row_reduce", "max")
-    group_reduce = getattr(args, "label_group_reduce", "max")
+    group_reduce = getattr(args, "label_group_reduce", "mean")
     teacher_kind = f"final_row{row_reduce}" + ("_per_head" if per_head else "")
     if per_head and group_reduce != "max":
         teacher_kind += f"_group{group_reduce}"
@@ -339,27 +267,18 @@ def run(family, description):
         prompt_ids = src["prompt_input_ids"].to(torch.long)
         expected_prompt_len = min(prompt_ids.numel(), args.prompt_limit)
 
-        # Resume only when the saved labels match the requested sequence shape.
-        # Old 2048 labels are therefore rebuilt after their prompt shards grow.
         if target.exists():
             saved = torch.load(target, map_location="cpu", weights_only=False)
             if decoding is not None:
                 require_matching_decoding(saved.get("decoding"), decoding, target)
                 if saved.get("seed") != args.seed:
                     raise ValueError(f"{target}: teacher seed differs; use a new output root")
-            # A per-head shard and a head-averaged one agree on every length
-            # checked below and differ only in the label's rank, so the kind is
-            # checked first: pointed at the other root, the run rebuilds rather
-            # than resuming into a mixed set of labels.
             if saved.get("teacher_kind") != teacher_kind:
                 print(f"rebuilding teacher shard from "
                       f"{saved.get('teacher_kind')!r} to {teacher_kind!r}: "
                       f"{target.name}", flush=True)
                 saved = None
             blocks = (saved.get("blocks") or []) if saved is not None else []
-            # The backend check matters as much as the lengths: a Dream and a
-            # LLaDA shard for the same sample can agree on every length and
-            # still hold labels from different models over different vocabs.
             if (blocks
                     and saved.get("backend", backend.name) == backend.name
                     and all(int(r.get("prompt_length", -1)) == expected_prompt_len
@@ -388,11 +307,6 @@ def run(family, description):
                    "teacher_kind": teacher_kind,
                    "blocks": records}
         if per_head and records:
-            # The head axis is the *KV* head axis: on a GQA backend the cache
-            # holds one entry per KV head, so that is the finest granularity
-            # eviction can act on, and the query heads sharing an entry are
-            # reduced with a max before the label is written. Recorded so a
-            # student reading these shards knows what its scores index.
             payload.update(
                 per_head_axis="kv_heads",
                 per_head_group_reduce=group_reduce,
@@ -408,10 +322,6 @@ def run(family, description):
                   flush=True)
     print(f"done: {len(list(out.glob('*.pt')))} shards total, {added} new -> {out}",
           flush=True)
-    # One-time offline cost, per dataset. Reported here rather than timed from
-    # outside because the wall clock of the launcher also covers the shards this
-    # run resumed rather than generated, and because the peak is the process's
-    # own -- a card shared with another job would otherwise be read as ours.
     print(f"cost: dataset={args.dataset} generated={added} "
           f"generate_h={(time.time() - started) / 3600:.4f} "
           f"process_h={(time.time() - process_started) / 3600:.4f} "

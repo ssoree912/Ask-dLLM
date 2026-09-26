@@ -1,21 +1,4 @@
-"""Train a scorer to predict the final x row-max label.
-
-Features are replayed rather than stored: each record keeps the exact block input
-(`x_at_block_start`), so the forward that produced the student's deployment-time
-hidden states can be reproduced here. That is the one thing the previous student
-got wrong — it trained on a prompt-only forward and was deployed on a full
-prompt+generation forward.
-
-Targets are ranking targets, so the loss is listwise (KL against the normalised
-label, weighted by --lambda-list) plus a pairwise term sampled across the whole
-range, and checkpoints are selected on mean recall over a k-grid rather than any
-single budget.
-
-Backend-agnostic: the replay forward goes through future_dllm.load_model, so the
-same trainer covers LLaDA and Dream. The block the scorer conditions on is read
-off the teacher record rather than assumed here, so a backend that ever cuts its
-cache around something wider than the block stays loadable.
-"""
+'Train a scorer to predict the final x row-max label.'
 
 from __future__ import annotations
 
@@ -40,7 +23,7 @@ def parse_args():
                         "forward has to reproduce the hidden states the selection "
                         "was made from, so a different model trains on states "
                         "deployment never sees")
-    p.add_argument("--teacher-root", default=str(REPO_ROOT / "artifacts/teacher/samsum"),
+    p.add_argument("--teacher-root", default=str(REPO_ROOT / "artifacts/teacher_per_head/samsum"),
                    help="comma-separated for mixed-domain training: val is split "
                         "per domain and the checkpoint is chosen on the domain "
                         "macro average, so a block-heavy domain cannot own it")
@@ -73,12 +56,6 @@ def parse_args():
 
 
 def recall_grid(pred, target, ratios=(0.05, 0.1, 0.2, 0.3, 0.5)):
-    """Mean top-k agreement over the grid, averaged over attention heads.
-
-    Takes [candidates] or [heads, candidates]. Per head there are 32 layers x 32
-    heads of these per record, so the set arithmetic this used to do in Python
-    is done on the device instead.
-    """
     p = pred if pred.dim() == 2 else pred.unsqueeze(0)
     t = target if target.dim() == 2 else target.unsqueeze(0)
     n = t.shape[-1]
@@ -93,11 +70,6 @@ def recall_grid(pred, target, ratios=(0.05, 0.1, 0.2, 0.3, 0.5)):
 
 
 def head_agreement(pred, ratio=0.2):
-    """Mean pairwise overlap of the heads' kept sets, at one budget.
-
-    1.0 means every head ranked the candidates the same way and the head axis
-    bought nothing; the label's own figure is the thing to compare against.
-    """
     if pred.ndim == 1 or pred.shape[0] < 2:
         return None
     k = max(1, int(pred.shape[-1] * ratio))
@@ -107,13 +79,9 @@ def head_agreement(pred, ratio=0.2):
 
 
 def checkpoint_name(datasets, counts, epochs, lr):
-    """What separates one scorer from another: which domains, how many samples of
-    each, and the two training knobs. The domain names themselves do not fit in a
-    directory name once there are four of them, so they go in through a hash and
-    are written out in full in meta.json."""
     tag = hashlib.sha1(",".join(sorted(datasets)).encode()).hexdigest()[:6]
     lr_text = f"{lr:g}"
-    if "e" not in lr_text and lr < 0.01:      # 0.0002 reads worse than 2e-4
+    if "e" not in lr_text and lr < 0.01:
         lr_text = f"{lr:.1e}".replace(".0e", "e")
     lr_text = lr_text.replace("e-0", "e-")
     return (f"{len(datasets)}ds_{'-'.join(str(c) for c in counts)}_e{epochs}"
@@ -121,12 +89,6 @@ def checkpoint_name(datasets, counts, epochs, lr):
 
 
 def window_start(record):
-    """Where the cache was cut for this block.
-
-    Both backends cut around the block itself today, so this is the block --
-    recorded explicitly so a backend that ever widens its window stays readable,
-    and defaulted for teacher shards written before the key existed.
-    """
     return int(record.get("window_start", record["block_start"]))
 
 
@@ -135,8 +97,6 @@ def window_length(record):
 
 
 def load_shard(path, attempts=3):
-    """The NAS the shards live on throws transient EIO under load; one of those
-    five hours into a run must not kill it."""
     for i in range(attempts):
         try:
             return torch.load(path, map_location="cpu", weights_only=False)
@@ -178,13 +138,9 @@ def main():
             require_matching_decoding(shard.get("decoding"), decoding, path)
         return shard
 
-    # Capture has to stay on so training sees the same hidden states deployment
-    # will hand the scorer.
     CustomCache.capture_layer_hidden_states = (
         lambda self, layer_id, hidden: self.layer_hidden_states.__setitem__(layer_id, hidden))
 
-    # Split val per domain: mmlu carries 2 blocks per sample against 4 elsewhere,
-    # so a sample-balanced val would let the block-heavy domains own the choice.
     roots = [r for r in args.teacher_root.split(",") if r]
     shard_caps = [int(c) for c in args.max_shards.split(",")] if args.max_shards else []
     if shard_caps and len(shard_caps) != len(roots):
@@ -201,10 +157,6 @@ def main():
             if cap > len(found):
                 raise SystemExit(f"{name}: asked for {cap} prompts, only {len(found)} exist")
             found = found[:cap]
-        # The labels only mean anything for the model that produced them, and
-        # nothing downstream would notice the mismatch: a LLaDA shard trained
-        # against Dream just replays a different vocabulary's ids and quietly
-        # learns to rank the wrong candidates.
         head = read_teacher(found[0])
         shard_backend = head.get("backend")
         if shard_backend is not None and shard_backend != backend.name:
@@ -214,9 +166,6 @@ def main():
                 f"{backend.name} checkpoint. Pass the model the labels came from."
             )
         kinds.add(head.get("teacher_kind", "final_rowmax"))
-        # Shards written before this header field existed simply omit it;
-        # defaulting those to 1 would call a per-head root head-averaged. Leave
-        # them out and let the label tensor itself settle the count below.
         if "num_label_heads" in head:
             label_heads.add(int(head["num_label_heads"]))
         split = max(1, int(len(found) * args.val_ratio))
@@ -228,18 +177,11 @@ def main():
     print(f"train {len(train_shards)} / val {len(val_shards)} shards "
           f"over {len(datasets)} domain(s)", flush=True)
 
-    # A per-head root and a head-averaged one train different students, and
-    # mixing them would silently broadcast one label rank against the other, so
-    # the roots have to agree before anything is built.
     if len(kinds) != 1 or len(label_heads) > 1:
         raise SystemExit(f"teacher roots disagree on the label: kinds={sorted(kinds)} "
                          f"heads={sorted(label_heads)}; train one kind at a time")
     teacher_kind = sorted(kinds)[0]
-    # Containment, not a suffix: the kind also records the group reduction
-    # when it is not the default, so "final_rowmean_per_head_groupmean"
-    # is per-head too.
     per_head = "_per_head" in teacher_kind
-    # None when no shard declares it; the probe below fills it in.
     K = sorted(label_heads)[0] if label_heads else None
 
     counts = [sum(1 for n, _ in train_shards + val_shards if n == d) for d in datasets]
@@ -248,10 +190,6 @@ def main():
         (args.name or checkpoint_name(datasets, counts, args.epochs, args.lr)))
     print(f"checkpoint -> {out_dir}", flush=True)
 
-    # Per-head labels carry an extra axis, [layers, heads, candidates], and the
-    # readout has to be as wide as that axis. Read it off the data rather than
-    # taking it as a flag: a mismatch here trains silently against the wrong
-    # target instead of failing.
     probe = load_shard(train_shards[0][1])["blocks"][0]["label_final_rowmax"]
     attn_heads = int(probe.shape[1]) if probe.dim() == 3 else 1
     print(f"teacher labels: {tuple(probe.shape)} -> attn_heads={attn_heads}", flush=True)
@@ -265,15 +203,10 @@ def main():
                          f"{K} head(s)")
     print(f"teacher_kind={teacher_kind} scorer emits {K} score(s) per candidate"
           f"{' (per KV head)' if per_head else ' (head-averaged)'}", flush=True)
-    # The label's head axis is the cache's KV head axis, so a scorer wider or
-    # narrower than the backbone's KV heads emits a kept set the cache cannot be
-    # indexed with -- the one mismatch here that still yields a loadable
-    # checkpoint.
     if per_head and attn_heads != backend.kv_heads:
         raise SystemExit(f"teacher labels carry {attn_heads} heads but "
                          f"{backend.name} has {backend.kv_heads} KV heads")
 
-    # Same class the deployment path loads, so the checkpoint drops straight in.
     from future_dllm import PromptUtilityStudent, StudentConfig
     student_cfg = StudentConfig(layer_count=L, hidden_dim=H, proj_dim=args.proj_dim,
                                 mlp_dim=args.mlp_dim, heads=("score",),
@@ -334,9 +267,6 @@ def main():
         x = record["x_at_block_start"].unsqueeze(0).to(device)
         cache = CustomCache(n_layers=L, device=device, keep_ratio=1.0)
         cache.layer_hidden_states = {}
-        # position_offset is the cache *window*, not the block: on Dream the
-        # window starts one token earlier. Passing block_start here would cut
-        # the cache around a different set of columns than the teacher did.
         model(x, window_start(record), 1, cache)
         return cache.layer_hidden_states
 
@@ -352,9 +282,6 @@ def main():
             pred = student.forward_layer(l, h, cand, head="score",
                                          block_indices=blk).squeeze(0)
             tgt = label[l]
-            # One head-averaged row or one row per attention head: the last axis
-            # is candidates either way, so the terms below are written against
-            # [rows, candidates] and the head-averaged case is simply one row.
             rows_t = tgt if tgt.dim() == 2 else tgt.unsqueeze(0)
             rows_p = pred if pred.dim() == 2 else pred.unsqueeze(0)
             mass = rows_t.sum(-1)
@@ -362,23 +289,10 @@ def main():
             if not bool(usable.any()):
                 continue
             rows_t, rows_p = rows_t[usable], rows_p[usable]
-            # listwise: KL against the normalised label distribution. The sum
-            # over candidates has to stay a sum — "batchmean" would divide by
-            # the candidate count and shrink the term by 132x (mmlu) to 2528x
-            # (gov_report), silently weighting domains by their prompt length.
-            # Over heads it is a mean, matching the pairwise term below. A sum
-            # there instead would scale only this term with the head count,
-            # which makes --lambda-list mean something different per backend:
-            # 4 KV heads on Dream against 32 on LLaDA, from one nominal 1.0.
-            # Mean on both keeps the two terms' balance fixed and keeps --lr at
-            # the value the head-averaged scorer was tuned at.
             kl = F.kl_div(F.log_softmax(rows_p, -1),
                           rows_t / rows_t.sum(-1, keepdim=True),
                           reduction="none").sum(-1)
             loss = args.lambda_list * kl.mean()
-            # pairwise: random pairs anywhere in the range, to fix the ordering.
-            # The same pair indices go to every head; the labels differ per head,
-            # so the constraint each head gets is its own.
             i = torch.randint(0, rows_t.shape[-1], (args.pairs,), device=device)
             j = torch.randint(0, rows_t.shape[-1], (args.pairs,), device=device)
             sign = torch.sign(rows_t[..., i] - rows_t[..., j])
@@ -392,10 +306,6 @@ def main():
                 opt.step()
             total += float(loss.detach())
             recalls.append(recall_grid(rows_p.detach(), rows_t))
-            # Whether the head axis is earning its storage: how much the heads'
-            # own kept sets overlap, against the same figure for the label they
-            # are fit to. At 1.0 every head ranked the candidates alike and the
-            # axis bought nothing.
             agreement = head_agreement(rows_p.detach())
             if agreement is not None:
                 agreements.append(agreement)
@@ -423,7 +333,7 @@ def main():
                     if a is not None:
                         agree.append(a); agree_label.append(al)
         means = {k: sum(v) / max(1, len(v)) for k, v in per_ds.items()}
-        score = sum(means.values()) / max(1, len(means))   # domain macro average
+        score = sum(means.values()) / max(1, len(means))
         detail = "  ".join(f"{k} {v:.3f}" for k, v in sorted(means.items()))
         head_line = ""
         if agree:
@@ -432,9 +342,6 @@ def main():
         print(f"epoch {epoch}: loss {sum(losses)/len(losses):.4f} | "
               f"val recall macro {score:.4f} [{detail}]{head_line} | "
               f"{(time.time()-started)/60:.1f}min", flush=True)
-        # Keep an independently loadable checkpoint for every completed epoch.
-        # The optimizer state and epoch number make --resume deterministic after
-        # an interruption; checkpoint-best remains the deployment convenience.
         epoch_dir = out_dir / f"checkpoint-epoch-{epoch:02d}"
         epoch_dir.mkdir(parents=True, exist_ok=True)
         torch.save({k: v.cpu() for k, v in student.state_dict().items()},
@@ -474,8 +381,6 @@ def main():
                       open(out_dir / "best.json", "w"))
             print(f"  saved (best {best:.4f})", flush=True)
     print(f"done. best val recall {best:.4f} -> {out_dir}/checkpoint-best", flush=True)
-    # Same one-time-cost line the extractor prints, so the two halves of the
-    # offline budget are measured the same way and can simply be added.
     print(f"cost: shards={len(train_shards) + len(val_shards)} epochs={args.epochs} "
           f"train_h={(time.time() - run_started) / 3600:.4f} "
           f"process_h={(time.time() - process_started) / 3600:.4f} "

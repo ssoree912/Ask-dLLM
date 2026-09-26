@@ -1,17 +1,8 @@
-"""Sparse-dLLM Dream decoding with a selectable cache ranking rule.
-
-The sampling order and transfer schedule follow the reference
-``dream/generation_utils.py::DreamGenerationMixin._sample``. Step 0 samples the
-whole block but confirms only its first token; subsequent steps sample masked
-rows and use the remaining-mask timestep schedule. Sampling primitives retain
-the Dream authors' Apache-2.0 implementation in generation_utils.py.
-"""
-
 import torch
 import torch.nn.functional as F
 
 from .cache import CustomCache
-from .dream_decoding import DreamDecoding
+from .dream_decoding import DEFAULT_DREAM_STEPS, DreamDecoding
 from .generation_utils import sample_tokens
 
 MASK_ID = 151666
@@ -28,14 +19,6 @@ def generate(model, prompt, steps=None, gen_length=128, block_length=32,
              top_k=None, alg_temp=None, eps=1e-3, eviction_method="student",
              on_block_complete=None, on_step=None, oracle_reduce=None,
              current_reduce=None):
-    """Return prompt + answer using the reference block sampling schedule.
-
-    ``on_block_complete(x, cache, block_index, block_start, selection_input)``
-    observes completed blocks for teacher collection. The selection input is
-    the full sequence entering step 1, before cache selection and revelation.
-    ``on_step(x, block_index, step_index)`` supports reference parity checks.
-    Callbacks must not sample or modify x.
-    """
     if cfg_scale != 0 or remasking is not None:
         raise ValueError("Dream uses alg/temperature/top_p, not LLaDA cfg_scale/remasking")
     if prompt.ndim != 2 or prompt.shape[0] != 1 or prompt.shape[1] < 1:
@@ -54,7 +37,7 @@ def generate(model, prompt, steps=None, gen_length=128, block_length=32,
         raise ValueError("student eviction requires a scorer")
 
     settings = DreamDecoding(alg=alg, temperature=temperature, top_p=top_p,
-                             steps=256 if steps is None else steps, eps=eps,
+                             steps=DEFAULT_DREAM_STEPS if steps is None else steps, eps=eps,
                              top_k=top_k, alg_temp=alg_temp)
     steps = settings.steps_for_length(gen_length)
     num_blocks = gen_length // block_length
@@ -71,12 +54,6 @@ def generate(model, prompt, steps=None, gen_length=128, block_length=32,
         selection_input = None
 
         def step_block(cache):
-            """Run one block's reveal schedule against ``cache``.
-
-            Factored out because the oracle runs it twice on the same block:
-            once with the whole cache to settle the answer the label is read
-            off, then again against the cache that label prunes.
-            """
             nonlocal selection_input
             for i in range(steps_per_block):
                 cache_state = min(i, 2)
@@ -149,18 +126,6 @@ def generate(model, prompt, steps=None, gen_length=128, block_length=32,
 
 
 def _oracle_block(model, x, bs, be, prompt_len, gen_length, step_block, reduce):
-    """Decode the block twice: once whole, then against its own label.
-
-    The upper bound the trained scorer is read against. Pass A keeps the entire
-    cache, so the block settles to the answer the teacher label is defined on;
-    one more forward over the completed block gives the attention that label is
-    built from. The block is then returned to masks and decoded again with the
-    cache pruned to that label's top-k -- the same budget the scorer gets, but
-    with the answer's own attention standing in for a prediction of it.
-
-    Not a guaranteed ceiling: the label is scored against pass A's answer while
-    the reported answer comes out of pass B, and the two can diverge.
-    """
     row_reduce, group_reduce, per_head = reduce
     n_layers = model.config.num_hidden_layers
     masked_block = x[:, bs:be].clone()
@@ -168,8 +133,6 @@ def _oracle_block(model, x, bs, be, prompt_len, gen_length, step_block, reduce):
     full = CustomCache(n_layers=n_layers, device=model.device, keep_ratio=1.0,
                        prompt_length=prompt_len, generation_length=gen_length,
                        eviction_method="sparse", baseline_order=True)
-    # Keeps the whole pool in candidate order, which is what makes the label's
-    # columns line up with the candidates pass B rebuilds.
     full.collect_pool = True
     step_block(full)
 

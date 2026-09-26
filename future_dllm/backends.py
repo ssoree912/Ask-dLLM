@@ -1,16 +1,3 @@
-"""One place that knows how each diffusion-LM family differs.
-
-The teacher extractor and the student trainer are identical for LLaDA and Dream
-apart from a handful of things: which class loads the weights, what the mask
-token is, what the layer count and hidden width are called on the config, and
-how Dream's autoregressive logit shift is absorbed. Keeping that here means the
-two scripts stay single-path, so a change to the label definition or the loss
-cannot land on one backend and miss the other.
-
-Backends are detected from the checkpoint's ``model_type`` rather than a flag,
-so passing ``--model model/Dream-v0-Instruct-7B`` is all it takes.
-"""
-
 from __future__ import annotations
 
 import json
@@ -23,43 +10,20 @@ import torch
 
 @dataclass(frozen=True)
 class Backend:
-    """What the family-agnostic scripts need to know about one model family."""
 
     name: str
     mask_id: int
     n_layers: int
     hidden_dim: int
-    # KV heads, not query heads. The eviction cache stores K/V before repeat_kv,
-    # so this is the axis filter_cache indexes and the finest granularity a
-    # per-head kept set can be stated at. MHA backends report their head count.
     kv_heads: int
-    # Total sequence length the checkpoint was trained for, for the warning in
-    # the extractor. LLaDA calls it max_sequence_length, Dream reuses the Qwen2
-    # max_position_embeddings.
     native_max_seq_len: int
     generate: Callable
 
-    # Dream was adapted from an autoregressive Qwen2, so row r's logits predict
-    # token r+1 and the decode has to read position r from row r-1 (Dream's own
-    # generation_utils does the same one-line shift). LLaDA is natively masked
-    # and predicts in place.
     logit_shift: bool = False
-    # A shifted backend cannot read its block's first token from the block's own
-    # rows: that token comes from the row *before* the block, which a block-only
-    # forward does not have. Sparse-dLLM's answer, which this follows, is to
-    # confirm that one token on the step-0 full-sequence forward, where the row
-    # is available and correct. From step 2 on the shift's meaningless first row
-    # then lands on an already-confirmed position and is masked out.
-    #
-    # The alternative -- widening the window by a preceding anchor row -- also
-    # works, but it takes one token per block out of the candidate pool and so
-    # scores a different candidate set than the Sparse-dLLM baseline does. The
-    # window is kept identical to the baseline's instead.
     seed_block_start: bool = False
 
 
 def detect_family(model_path: str | Path) -> str:
-    """``llada`` or ``dream``, from the checkpoint's config.json."""
     config_path = Path(model_path) / "config.json"
     if not config_path.is_file():
         raise SystemExit(f"no config.json under {model_path}")
@@ -76,13 +40,6 @@ def detect_family(model_path: str | Path) -> str:
 
 
 def _llada_kv_heads(cfg) -> int:
-    """LLaDA's KV head count, however its config spells it.
-
-    ``effective_n_kv_heads`` is a property of the ``ModelConfig`` dataclass in
-    configuration_llada.py, not of the ``LLaDAConfig`` that AutoConfig returns,
-    so reading it off the loaded config raises AttributeError. The rule below is
-    that property's, applied to whichever object we were handed.
-    """
     effective = getattr(cfg, "effective_n_kv_heads", None)
     if effective is not None:
         return int(effective)
@@ -101,11 +58,6 @@ def _llada_kv_heads(cfg) -> int:
 
 def load_model(model_path: str | Path, *, max_seq_len: int, block_length: int,
                keep_ratio: float = 1.0, device_map: str = "cuda:0") -> tuple[torch.nn.Module, Backend]:
-    """Load a checkpoint with the eviction cache wired in, and describe it.
-
-    ``block_len`` and ``keep_ratio`` are injected onto the config because that is
-    what the patched attention reads at selection time, in both backends.
-    """
     family = detect_family(model_path)
 
     if family == "dream":
@@ -113,13 +65,8 @@ def load_model(model_path: str | Path, *, max_seq_len: int, block_length: int,
         from .modeling_dream import DreamModel
         from .dream_generate import generate as dream_generate
 
-        # The vendored config class, not AutoConfig: the checkpoint's auto_map
-        # points at the Hub's own modeling code, and a remote DreamConfig would
-        # not be the class our patched DreamModel expects.
         cfg = DreamConfig.from_pretrained(model_path)
         native = int(getattr(cfg, "max_position_embeddings", max_seq_len))
-        # The window is the block exactly, same as Sparse-dLLM: the queried rows
-        # and the columns filter_cache removes are the same set.
         cfg.block_len, cfg.keep_ratio = block_length, keep_ratio
         cfg.use_cache = False
         model = DreamModel.from_pretrained(

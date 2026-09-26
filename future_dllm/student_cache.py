@@ -1,5 +1,3 @@
-"""Load and run block-conditioned prompt-utility checkpoints for cache selection."""
-
 from __future__ import annotations
 
 import json
@@ -12,17 +10,12 @@ import torch.nn as nn
 
 @dataclass(frozen=True, slots=True)
 class StudentConfig:
+    attn_heads: int
     layer_count: int = 32
     hidden_dim: int = 4096
     proj_dim: int = 256
     mlp_dim: int = 512
     heads: tuple[str, ...] = ("score",)
-    # Attention heads scored separately. 1 is the head-averaged scorer this repo
-    # shipped: one score per position, one kept set per layer. Larger means the
-    # readout emits one score per attention head, so each head can keep its own
-    # top-k. Only the readout widens -- the projections stay shared, which is
-    # what keeps the checkpoint the same size to within a couple of MB.
-    attn_heads: int = 1
 
 
 def _normalize_heads(heads: tuple[str, ...] | list[str] | str) -> tuple[str, ...]:
@@ -36,13 +29,7 @@ def _normalize_heads(heads: tuple[str, ...] | list[str] | str) -> tuple[str, ...
 
 
 def _build_score_head(config: StudentConfig) -> nn.Sequential:
-    # [candidate ; current-block ; candidate * current-block]
     width = config.proj_dim * 3
-    # The trunk stays shared and only the readout widens: the features a
-    # candidate is scored from are the same whichever head reads it, so what
-    # differs per head is how those features are weighed, which is exactly a
-    # linear readout. attn_heads=1 reproduces the original [mlp_dim, 1] weight,
-    # so checkpoints written before this existed still load.
     if config.attn_heads < 1:
         raise RuntimeError(f"invalid student attn_heads: {config.attn_heads}")
     return nn.Sequential(
@@ -95,9 +82,7 @@ class PromptUtilityStudentLayer(nn.Module):
         fused = torch.cat([token_proj, block_proj, token_proj * block_proj], dim=-1)
         scores = self._head(head)(fused)
         if self.attn_heads == 1:
-            return scores.squeeze(-1)                  # [batch, candidates]
-        # [batch, attn heads, candidates]: heads first, so a top-k over the last
-        # axis gives each head its own kept set.
+            return scores.squeeze(-1)
         return scores.transpose(-2, -1)
 
 
@@ -134,7 +119,6 @@ class PromptUtilityStudent(nn.Module):
         )
 
     def block_proj_norms(self) -> list[float]:
-        """Per-layer Frobenius norm of the block-condition projection."""
         return [
             float(self.layers[str(i)].block_proj.weight.norm())
             for i in self.layer_indices
@@ -153,11 +137,9 @@ def load_prompt_utility_student(
         )
     raw_config = json.loads(config_path.read_text(encoding="utf-8"))
     raw_config["heads"] = tuple(raw_config.get("heads", ("score",)))
-    # Checkpoints written before the field was renamed carry kv_heads. Same
-    # axis, same weights -- only the name moved -- so they load unchanged rather
-    # than failing on an unexpected keyword.
     if "kv_heads" in raw_config:
         raw_config.setdefault("attn_heads", raw_config.pop("kv_heads"))
+    raw_config.setdefault("attn_heads", 1)
     legacy_cond = raw_config.pop("cond", None)
     if legacy_cond not in (None, "blk"):
         raise RuntimeError(

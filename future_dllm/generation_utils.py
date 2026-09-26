@@ -38,7 +38,6 @@ def top_p_logits(logits, top_p=None):
     sorted_logits, sorted_indices = torch.sort(logits, descending=True)
     cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
     sorted_indices_to_remove = cumulative_probs > top_p
-    # Shift the indices to the right to keep the first token above the threshold
     sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
     sorted_indices_to_remove[..., 0] = 0
 
@@ -48,8 +47,7 @@ def top_p_logits(logits, top_p=None):
     return logits
 
 def top_k_logits(logits, top_k=None):
-    top_k = min(top_k, logits.size(-1))  # Safety check
-    # Remove all tokens with a probability less than the last token of the top-k
+    top_k = min(top_k, logits.size(-1))
     indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
     logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
     return logits
@@ -76,10 +74,8 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
 
     if margin_confidence:
         sorted_probs, _ = torch.sort(probs, dim=-1, descending=True)
-        # Extract top1 and top2 probabilities
         top1_probs = sorted_probs[:, 0]
         top2_probs = sorted_probs[:, 1]
-        # Calculate confidence as top1 - top2
         confidence = top1_probs - top2_probs
 
     if neg_entropy:
@@ -103,36 +99,27 @@ class DreamGenerationConfig(GenerationConfig):
         self.top_k: Optional[int] = kwargs.pop("top_k", None)
         self.max_length = kwargs.pop("max_length", 20)
         self.max_new_tokens = kwargs.pop("max_new_tokens", None)
-        # diffusion specific params
         self.eps: float = kwargs.pop("eps", 1e-3)
         self.steps: int = kwargs.pop("steps", 512)
         self.alg: str = kwargs.pop("alg", 'origin')
         self.alg_temp: Optional[float] = kwargs.pop("alg_temp", None)
 
-        # Parameters that define the output variables of `generate`
         self.num_return_sequences: int = kwargs.pop("num_return_sequences", 1)
         self.return_dict_in_generate: bool = kwargs.pop("return_dict_in_generate", False)
         self.output_history: bool = kwargs.pop("output_history", False)
 
-        # Special tokens that can be used at generation time
         self.mask_token_id = kwargs.pop("mask_token_id", None)
         self.pad_token_id = kwargs.pop("pad_token_id", None)
         self.bos_token_id = kwargs.pop("bos_token_id", None)
         self.eos_token_id = kwargs.pop("eos_token_id", None)
 
-        # Wild card
         self.generation_kwargs = kwargs.pop("generation_kwargs", {})
 
-        # The remaining attributes do not parametrize `.generate()`, but are informative and/or used by the hub
-        # interface.
         self._from_model_config = kwargs.pop("_from_model_config", False)
         self._commit_hash = kwargs.pop("_commit_hash", None)
         self.transformers_version = kwargs.pop("transformers_version", __version__)
 
-        # Additional attributes without default values
         if not self._from_model_config:
-            # we don't want to copy values from the model config if we're initializing a `GenerationConfig` from a
-            # model's default configuration file
             for key, value in kwargs.items():
                 try:
                     setattr(self, key, value)
@@ -140,7 +127,6 @@ class DreamGenerationConfig(GenerationConfig):
                     logger.error(f"Can't set {key} with value {value} for {self}")
                     raise err
 
-        # Validate the values of the attributes
         self.validate(is_init=True)
 
     def validate(self, is_init=False):
@@ -153,9 +139,6 @@ class DreamGenerationMixin:
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None
     ) -> Tuple[torch.LongTensor, Dict[str, Any]]:
-        """Expands tensors from [batch_size, ...] to [batch_size * expand_size, ...]"""
-        # Do not call torch.repeat_interleave if expand_size is 1 because it clones
-        # the input tensor and thus requires more memory although no change is applied
         if expand_size == 1:
             return input_ids, attention_mask
         if input_ids is not None:
@@ -165,15 +148,11 @@ class DreamGenerationMixin:
         return input_ids, attention_mask
 
     def _validate_generated_length(self, generation_config, input_ids_length, has_default_max_length):
-        """Performs validation related to the resulting generated length"""
 
-        # Can't throw warnings/exceptions during compilation
         if is_torchdynamo_compiling():
             return
 
-        # 1. Max length warnings related to poor parameterization
         if has_default_max_length and generation_config.max_new_tokens is None and generation_config.max_length == 20:
-            # 20 is the default max_length of the generation config
             warnings.warn(
                 f"Using the model-agnostic default `max_length` (={generation_config.max_length}) to control the "
                 "generation length. We recommend setting `max_new_tokens` to control the maximum length of the "
@@ -194,7 +173,6 @@ class DreamGenerationMixin:
         has_default_max_length,
         input_ids_length,
     ):
-        """Prepared max and min length in generation configs to avoid clashes between similar attributes"""
 
         if generation_config.max_new_tokens is not None:
             if not has_default_max_length and generation_config.max_length is not None:
@@ -218,23 +196,14 @@ class DreamGenerationMixin:
     def _prepare_generation_config(
         self, generation_config: Optional[DreamGenerationConfig], **kwargs: Dict
     ) -> DreamGenerationConfig:
-        """
-        Prepares the base generation config, then applies any generation configuration options from kwargs. This
-        function handles retrocompatibility with respect to configuration files.
-        """
-        # priority: `generation_config` argument > `model.generation_config` (the default generation config)
         using_model_generation_config = False
         if generation_config is None:
             generation_config = DreamGenerationConfig.from_model_config(self.config)
             using_model_generation_config = True
 
-        # `torch.compile` can't compile `copy.deepcopy`, arguments in `kwargs` that are part of `generation_config`
-        # will mutate the object with `.update`. As such, passing these arguments through `kwargs` is disabled -- an
-        # exception will be raised in `_validate_model_kwargs`
         if not is_torchdynamo_compiling():
             generation_config = copy.deepcopy(generation_config)
             _kwargs = generation_config.update(**kwargs)
-            # If `generation_config` is provided, let's fallback ALL special tokens to the default values for the model
             if not using_model_generation_config:
                 if generation_config.bos_token_id is None:
                     generation_config.bos_token_id = self.generation_config.bos_token_id
@@ -252,16 +221,7 @@ class DreamGenerationMixin:
         generation_config: DreamGenerationConfig,
         device: Optional[Union[torch.device, str]] = None,
     ):
-        """
-        Prepares the special tokens for generation, overwriting the generation config with their processed versions
-        converted to tensor.
 
-        Note that `generation_config` is changed in place and stops being serializable after this method is called.
-        That is no problem if called within `generate` (`generation_config` is a local copy that doesn't leave the
-        function). However, if called outside `generate`, consider creating a copy of `generation_config` first.
-        """
-
-        # Convert special tokens to tensors
         def _tensor_or_none(token, device=None):
             if token is None:
                 return token
@@ -276,19 +236,13 @@ class DreamGenerationMixin:
         pad_token_tensor = _tensor_or_none(generation_config.pad_token_id, device=device)
         mask_token_tensor = _tensor_or_none(generation_config.mask_token_id, device=device)
 
-        # We can have more than one eos token. Always treat it as a 1D tensor (when it exists).
         if eos_token_tensor is not None and eos_token_tensor.ndim == 0:
             eos_token_tensor = eos_token_tensor.unsqueeze(0)
 
-        # Set pad token if unset (and there are conditions to do so)
         if pad_token_tensor is None and eos_token_tensor is not None:
             pad_token_tensor = eos_token_tensor[0]
             logger.warning(f"Setting `pad_token_id` to `eos_token_id`:{pad_token_tensor} for open-end generation.")
 
-        # Update generation config with the updated special tokens tensors
-        # NOTE: this must be written into a different attribute name than the one holding the original special tokens
-        # (in their non-tensor form), in order to enable end-to-end compilation. See
-        # https://pytorch.org/docs/stable/torch.compiler_cudagraph_trees.html#limitations
         generation_config._bos_token_tensor = bos_token_tensor
         generation_config._eos_token_tensor = eos_token_tensor
         generation_config._pad_token_tensor = pad_token_tensor
@@ -301,19 +255,16 @@ class DreamGenerationMixin:
         generation_config: Optional[DreamGenerationConfig] = None,
         **kwargs,
     ) -> Union[DreamModelOutput, torch.LongTensor]:
-        # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
         generation_config = self._prepare_generation_config(generation_config, **kwargs)
         generation_tokens_hook_func = kwargs.pop("generation_tokens_hook_func", lambda step, x, logits: x)
         generation_logits_hook_func = kwargs.pop("generation_logits_hook_func", lambda step, x, logits: logits)
 
-        # 2. Define model inputs
         assert inputs is not None
         input_ids = inputs
         device = input_ids.device
         attention_mask = kwargs.pop("attention_mask", None)
         self._prepare_special_tokens(generation_config, device=device)
 
-        # 3. Prepare `max_length`.
         input_ids_length = input_ids.shape[-1]
         has_default_max_length = kwargs.get("max_length") is None and generation_config.max_length is not None
         generation_config = self._prepare_generated_length(
@@ -324,7 +275,6 @@ class DreamGenerationMixin:
 
         self._validate_generated_length(generation_config, input_ids_length, has_default_max_length)
 
-        # 4. Check input_ids
         if not is_torchdynamo_compiling() and self.device.type != input_ids.device.type:
             warnings.warn(
                 "You are calling .generate() with the `input_ids` being on a device type different"
@@ -369,7 +319,6 @@ class DreamGenerationMixin:
         generation_tokens_hook_func,
         generation_logits_hook_func
     ) -> Union[DreamModelOutput, torch.LongTensor]:
-        # init values
         output_history = generation_config.output_history
         return_dict_in_generate = generation_config.return_dict_in_generate
         max_length = generation_config.max_length
@@ -384,16 +333,12 @@ class DreamGenerationMixin:
 
         histories = [] if (return_dict_in_generate and output_history) else None
 
-        # pad input_ids to max_length
         x = F.pad(input_ids, (0, max_length - input_ids.shape[1]), value=mask_token_id)
 
         if attention_mask is not None and torch.any(attention_mask == 0.0):
-            # we do not mask the [MASK] tokens so value = 1.0
             attention_mask = F.pad(attention_mask, (0, max_length - attention_mask.shape[1]), value=1.0)
             tok_idx = attention_mask.long().cumsum(-1) - 1
             tok_idx.masked_fill_(attention_mask == 0, 1)
-            # attention_mask is of shape [B, N]
-            # broadcast to [B, 1, N, N]
             attention_mask = torch.logical_and(
                 attention_mask.unsqueeze(1).unsqueeze(-2),
                 attention_mask.unsqueeze(1).unsqueeze(-1),
@@ -404,14 +349,12 @@ class DreamGenerationMixin:
 
         timesteps = torch.linspace(1, eps, steps + 1, device=x.device)
 
-        # this allows user-defined token control of the intermediate steps
         x = generation_tokens_hook_func(None, x, None)
         for i in range(steps):
             mask_index = (x == mask_token_id)
             logits = self(x, attention_mask, tok_idx).logits
             logits = torch.cat([logits[:,:1], logits[:, :-1]], dim=1)
 
-            # this allows user-defined logits control of the intermediate steps
             logits = generation_logits_hook_func(i, x, logits)
 
             mask_logits = logits[mask_index]
@@ -449,7 +392,6 @@ class DreamGenerationMixin:
                     row_indices = torch.arange(x.size(0), device=self.device).unsqueeze(1).expand_as(transfer_index)
                     x[row_indices,transfer_index] = x_[row_indices,transfer_index]
 
-            # this allows user-defined token control of the intermediate steps
             x = generation_tokens_hook_func(i, x, logits)
 
             if histories is not None:

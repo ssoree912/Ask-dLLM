@@ -1,4 +1,4 @@
-"""Select the OpenCompass datasets and run one model in a single process."""
+'Select the OpenCompass datasets and run one model in a single process.'
 import argparse
 import os
 from pathlib import Path
@@ -32,7 +32,7 @@ def build_config(family, dataset="all", limit=None):
             dream_alg=os.environ.get("DREAM_ALG", "entropy"),
             dream_temperature=float(os.environ.get("DREAM_TEMPERATURE", "0.2")),
             dream_top_p=float(os.environ.get("DREAM_TOP_P", "0.95")),
-            dream_steps=int(os.environ.get("DREAM_STEPS", "256")),
+            dream_steps=int(os.environ.get("DREAM_STEPS", "512")),
             dream_seed=int(os.environ.get("DREAM_SEED", "0")),
         )
     return cfg

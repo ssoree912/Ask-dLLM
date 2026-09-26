@@ -38,7 +38,6 @@ except ImportError:
 
 
 def normalize_answer(s: str) -> str:
-    """Lower text and remove punctuation, articles and extra whitespace."""
 
     def remove_articles(text):
         return re.sub(r"\b(a|an|the)\b", " ", text)
@@ -57,7 +56,6 @@ def normalize_answer(s: str) -> str:
 
 
 def normalize_zh_answer(s: str) -> str:
-    """Lower text and remove punctuation, extra whitespace."""
 
     def white_space_fix(text):
         return "".join(text.split())
@@ -148,7 +146,7 @@ def code_sim_score(prediction: str, ground_truth: str, **kwargs):
 
 def get_code_sim_score(doc: dict, results: list[str], **kwargs):
     output = 0.0
-    prediction = results[0]  ## important! do not strip the prediction!
+    prediction = results[0]
     for ground_truth in doc["answers"]:
         score = code_sim_score(prediction, ground_truth)
         output = max(score, output)
@@ -276,9 +274,6 @@ def get_qa_f1_zh_score(doc: dict, results: list[str], **kwargs):
     return {"qa_f1_zh_score": output}
 
 
-# Unified scoring wrappers for group aggregation
-# Each wrapper calls the original get_* function and returns with "score" key
-# This enables all tasks to output the same metric name for group-level aggregation
 
 
 def get_qa_f1_with_score(doc: dict, results: list[str], **kwargs):

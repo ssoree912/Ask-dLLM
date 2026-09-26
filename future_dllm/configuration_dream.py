@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Dream model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
@@ -38,7 +37,7 @@ class DreamConfig(PretrainedConfig):
         max_position_embeddings=32768,
         initializer_range=0.02,
         rms_norm_eps=1e-6,
-        use_cache=False,  # cache not used in diffusion
+        use_cache=False,
         tie_word_embeddings=False,
         rope_theta=10000.0,
         rope_scaling=None,
@@ -60,7 +59,6 @@ class DreamConfig(PretrainedConfig):
         self.sliding_window = sliding_window if use_sliding_window else None
         self.max_window_layers = max_window_layers
 
-        # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
 
@@ -72,8 +70,6 @@ class DreamConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
         self.attention_dropout = attention_dropout
-        # Validate the correctness of rotary position embeddings parameters
-        # BC: if there is a 'type' field, move it to 'rope_type'.
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Generate and score ARC-Challenge, PIQA, and GPQA with OpenCompass.
-# Usage: scripts/run_oc_mc.sh <llada|dream> <keep_ratio> [checkpoint] [all|arc_c|piqa|gpqa]
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAMILY="${1:?usage: run_oc_mc.sh <llada|dream> <keep_ratio> [checkpoint] [dataset]}"

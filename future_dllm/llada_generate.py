@@ -1,10 +1,3 @@
-"""Block-wise diffusion decoding for LLaDA, with future-attention cache eviction.
-
-The per-block cache is built on step 0 and 1 by running the full sequence;
-``filter_cache`` prunes it to ``keep_ratio`` with the trained scorer, and the
-remaining steps run against the pruned cache plus the block itself.
-"""
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -15,7 +8,6 @@ MASK_ID = 126336
 
 
 def add_gumbel_noise(logits, temperature):
-    """Gumbel-max sampling. float64 per arXiv:2409.02908; temperature 0 is greedy."""
     if temperature == 0:
         return logits
     logits = logits.to(torch.float64)
@@ -24,7 +16,6 @@ def add_gumbel_noise(logits, temperature):
 
 
 def get_num_transfer_tokens(mask_index, steps):
-    """How many tokens each step reveals, under LLaDA's linear noise schedule."""
     mask_num = mask_index.sum(dim=1, keepdim=True)
     base, remainder = mask_num // steps, mask_num % steps
     counts = torch.zeros(mask_num.size(0), steps, device=mask_index.device,
@@ -40,23 +31,6 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=32,
              mask_id=MASK_ID, cache_scorer=None, *, eviction_method="student",
              eviction_accum="none", eviction_accum_decay=1.0, oracle_reduce=None,
              current_reduce=None):
-    """Generate ``gen_length`` tokens block by block.
-
-    ``cache_scorer`` is a trained ``PromptUtilityStudent``; without one the model
-    only runs at ``keep_ratio=1.0`` (no eviction). ``keep_ratio`` comes from
-    ``model.config``.
-
-    ``eviction_method`` picks what decides the eviction: ``"student"`` uses the
-    trained scorer, ``"sparse"`` uses Sparse-dLLM's attention score, which is
-    what makes the baseline row runnable on this backend too, and ``"oracle"``
-    uses the block's own teacher label -- see ``_oracle_block``.
-
-    ``eviction_accum="across_blocks"`` carries the scorer's own output forward
-    between blocks instead of deciding each block from scratch -- H2O's time
-    axis, with the block standing in for the AR step. ``eviction_accum_decay``
-    weights the carried history: 1.0 is a plain running sum, 0.0 reproduces the
-    per-block default. The state lives here because a cache lasts one block.
-    """
     if eviction_method not in ("student", "current", "sparse", "oracle"):
         raise ValueError("eviction_method must be student, current, sparse or oracle")
     if (oracle_reduce is not None) != (eviction_method == "oracle"):
@@ -85,12 +59,6 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=32,
             x[:, block_start:block_end] == mask_id, steps_per_block)
 
         def step_block(cache):
-            """Run one block's reveal schedule against ``cache``.
-
-            Factored out because the oracle runs it twice on the same block:
-            once with the whole cache to settle the answer the label is read
-            off, then again against the cache that label prunes.
-            """
             for i in range(steps_per_block):
                 cache_state = 2 if i > 1 else i
                 model_input = x if cache_state != 2 else x[:, block_start:block_end]
@@ -117,14 +85,6 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=32,
                     target[j, reveal] = x0[j, reveal]
 
         if oracle_reduce is None:
-            # A fresh cache per block: nothing is carried over, so the selection is
-            # made once against the block that will use it.
-            # baseline_order matches Sparse-dLLM at keep_ratio=1.0. Their
-            # modeling_llada.filter_cache scores and top-k's unconditionally, so
-            # even when the budget keeps everything the survivors come back ordered
-            # by importance, not by position. Keeping natural order there changes
-            # the order of the float sums in attention and, through sampling, the
-            # tokens -- the same divergence the Dream path hit.
             cache = CustomCache(
                 n_layers=model.config.n_layers, device=model.device,
                 keep_ratio=model.config.keep_ratio,
@@ -142,23 +102,6 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=32,
 
 
 def _oracle_block(model, x, bs, be, prompt_len, gen_length, step_block, reduce):
-    """Decode the block twice: once whole, then against its own label.
-
-    The LLaDA counterpart of ``dream_generate._oracle_block``, and the same
-    procedure: pass A keeps the entire cache, so the block settles to the answer
-    the teacher label is defined on; one more forward over the completed block
-    gives the attention that label is built from; the block then goes back to
-    masks and is decoded again against a cache pruned to that label's top-k --
-    the same budget the scorer gets, with the answer's own attention standing in
-    for a prediction of it.
-
-    Not a guaranteed ceiling: the label is scored against pass A's answer while
-    the reported answer comes out of pass B, and the two can diverge.
-
-    No ``attention_mask="full"`` on the capture forward, unlike Dream: LLaDA is
-    natively masked and already attends both ways, so there is no causal mask to
-    override.
-    """
     row_reduce, group_reduce, per_head = reduce
     n_layers = model.config.n_layers
     masked_block = x[:, bs:be].clone()
@@ -166,8 +109,6 @@ def _oracle_block(model, x, bs, be, prompt_len, gen_length, step_block, reduce):
     full = CustomCache(n_layers=n_layers, device=model.device, keep_ratio=1.0,
                        prompt_length=prompt_len, generation_length=gen_length,
                        eviction_method="sparse", baseline_order=True)
-    # Keeps the whole pool in candidate order, which is what makes the label's
-    # columns line up with the candidates pass B rebuilds.
     full.collect_pool = True
     step_block(full)
 

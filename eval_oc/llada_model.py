@@ -1,9 +1,3 @@
-"""OpenCompass generation for LLaDA with a trained cache scorer.
-
-LLaDA uses the raw OpenCompass prompt. Generation is rounded to whole blocks,
-and its token budget is reserved before the prompt is left-truncated.
-"""
-
 from __future__ import annotations
 
 import os
@@ -18,7 +12,6 @@ from .model import _convert_base_messages
 
 
 class LLaDAFutureOC(BaseModel):
-    """LLaDA with future-attention cache eviction, driven by OpenCompass."""
 
     def __init__(
         self,
@@ -81,11 +74,8 @@ class LLaDAFutureOC(BaseModel):
                 f"keep_ratio={self.model.config.keep_ratio} "
                 f"block_len={self.model.config.block_len}, expected "
                 f"{self._keep_ratio} / {self._block_length}")
-        # Their _load_model also sets config.kernel_size. Ours is not a config
-        # field: cache.py takes the pooling width as pool_kernel_size and fixes
-        # it at 3, which is the value their published config passes.
         self.tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-        self.tokenizer.truncation_side = "left"   # OpenCompass's own default
+        self.tokenizer.truncation_side = "left"
 
         self._scorer = None
         if self._eviction_method == "student" and self._keep_ratio < 1.0:
@@ -110,7 +100,6 @@ class LLaDAFutureOC(BaseModel):
               f"decoding={self._decoding}", flush=True)
 
     def _encode(self, text: str, max_length: int):
-        # No chat template: theirs tokenizes the flattened prompt as is.
         return self.tokenizer.batch_encode_plus(
             [text], return_tensors="pt", padding=True, truncation=True,
             add_special_tokens=True, max_length=max_length)
@@ -123,14 +112,8 @@ class LLaDAFutureOC(BaseModel):
     @torch.no_grad()
     def generate(self, inputs: List[str], max_out_len: int,
                  stopping_criteria: List[str] = []) -> List[str]:
-        # stopping_criteria is declared because GenInferencer only passes it to
-        # a generate() that names it, and LLaDA -- unlike their Dream path --
-        # actually cuts the decoded string on the stop words.
         from future_dllm.llada_generate import generate
 
-        # Their order: round the budget up to a whole block first, then clamp
-        # steps to it. Reversing the two would let steps exceed the rounded
-        # budget and trip the steps % num_blocks assert inside generate().
         gen_length = int(max_out_len)
         if gen_length % self._block_length:
             gen_length = (gen_length // self._block_length + 1) * self._block_length
