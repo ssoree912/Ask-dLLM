@@ -1,139 +1,136 @@
 # Ask-dLLM
 
-Teacher extraction, cache-scorer training, and inference for LLaDA and Dream.
-The teacher measures attention from completed answer blocks. The student learns
-to rank cache entries using the hidden states available at eviction time.
+KV cache eviction for diffusion LLMs, ranking cache entries by what the completed answer needs.
 
-This development branch is based on
-[Future_dLLM, commit 890cce0](https://github.com/ssoree912/Future_dLLM/commit/890cce01c70c06ffa6d7b22deeaff669bfdb8c7f).
+Models: `GSAI-ML/LLaDA-8B-Instruct`, `Dream-org/Dream-v0-Instruct-7B`.
 
-## Configuration
-
-| Model | Total tokens (prompt + generation) | Block length |
-| --- | ---: | ---: |
-| LLaDA-8B-Instruct | 4096 | 32 |
-| Dream-v0-Instruct-7B | 2048 | 32 |
-
-The launch scripts use these budgets for extraction, training, and inference.
-Each prompt is left-truncated after reserving the task's generation budget.
-Dream defaults to entropy decoding, temperature 0.2, top-p 0.95, and a
-256-step cap. Its scorer checkpoint must match the extraction decoding settings.
-Scripts expose only physical GPU 2 as `cuda:0`; model loading uses one GPU.
-
-## Installation and data
+## Installation
 
 ```bash
 conda env create -f environment.yml
 conda activate future-dllm
-bash scripts/download_model.sh
-MODEL_REPO=Dream-org/Dream-v0-Instruct-7B \
-  MODEL_DIR="$PWD/model/Dream-v0-Instruct-7B" bash scripts/download_model.sh
-python scripts/download_data.py --parts train eval longbench bbh
+export CUDA_VISIBLE_DEVICES=2
 ```
 
-Use local model directories containing `config.json`, tokenizer files, and
-weights. Set `FUTURE_DLLM_MODEL` to use an existing model directory and
-`FUTURE_DLLM_DATA` to use an existing training/lm-eval data directory.
-Weights, datasets, teacher labels, checkpoints, and results are not committed.
+- [Model download](scripts/download_model.sh)
+- [Dataset download](scripts/download_data.py)
+- Teacher extraction: [LLaDA](scripts/extract_default_teacher.sh) / [Dream](scripts/extract_default_teacher_dream.sh)
+- Student training: [LLaDA](scripts/train_default_student.sh) / [Dream](scripts/train_default_student_dream.sh)
 
-OpenCompass runs in a separate environment because it requires older NumPy and
-Pandas versions than the training environment:
+```text
+Ask-dLLM/
+├── model/
+│   ├── LLaDA-8B-Instruct/
+│   └── Dream-v0-Instruct-7B/
+├── data/
+│   ├── eval/<name>/           # Evaluation parquet files
+│   ├── train/<name>/          # Training parquet/JSONL files
+│   ├── longbench/data/       # LongBench JSONL files
+│   └── gpqa/                 # OpenCompass GPQA CSV files
+├── artifacts/                # Prompt shards, teacher labels, checkpoints
+└── results/                  # Evaluation results
+```
+
+```bash
+scripts/download_model.sh
+MODEL_REPO=Dream-org/Dream-v0-Instruct-7B \
+  MODEL_DIR="$PWD/model/Dream-v0-Instruct-7B" scripts/download_model.sh
+python scripts/download_data.py --parts eval train longbench bbh
+```
+
+OpenCompass setup:
 
 ```bash
 python -m venv --system-site-packages .venv-oc
 .venv-oc/bin/python -m pip install -r requirements-oc.txt
 export OC_PYTHON="$PWD/.venv-oc/bin/python"
-bash scripts/fetch_oc_data.sh
+scripts/fetch_oc_data.sh
 ```
 
-GPQA requires access to the gated `Idavidrein/gpqa` dataset and a Hugging Face
-token (`HF_TOKEN`). OpenCompass downloads ARC-Challenge on first use; PIQA is
-prepared by `fetch_oc_data.sh`. The default cache is `.oc_cache/`, configurable
-with `COMPASS_DATA_CACHE`. GPQA CSV files live in `data/gpqa/`.
+GPQA requires approved dataset access and `HF_TOKEN`.
 
-## Teacher extraction
+## Evaluation datasets
+
+Total length (prompt + generation): **LLaDA 4096**, **Dream 2048**. Block length: **32**.
+
+| Dataset | Generation length |
+|---|---:|
+| `gov_report` / `multi_news` / `qmsum` | 512 |
+| `samsum` / `qasper` / `narrativeqa` | 128 |
+| `trec` / `lcc` / `repobench-p` / `multifieldqa_en` | 64 |
+| `triviaqa` / `2wikimqa` / `hotpotqa` / `musique` / `passage_retrieval_en` / `passage_count` | 32 |
+| `gsm8k` (5-shot) | 256 |
+| `math` / `math500` (4-shot) | 256 |
+| `humaneval` / `mbpp` (3-shot for MBPP) | 512 |
+| `bbh` (3-shot) | 256 |
+| `arc_c` / `piqa` / `gpqa` (5-shot for GPQA) | 256 |
+
+ARC-Challenge, PIQA, and GPQA use **OpenCompass generative evaluation**. Other tasks use lm-eval.
+
+## Training datasets
+
+| Dataset | Samples | Generation length | LLaDA prompt limit | Dream prompt limit | Teacher blocks |
+|---|---:|---:|---:|---:|---:|
+| `math5s` | 500 | 256 | 3840 | 1792 | 8 |
+| `mbpp_full` | 371 | 256 | 3840 | 1792 | 8 |
+| `gov_report` | 150 | 512 | 3584 | 1536 | 16 |
+| `multi_news` | 100 | 512 | 3584 | 1536 | 16 |
+| `musique` | 500 | 32 | 4064 | 2016 | 1 |
+
+Teacher blocks = generation length / 32. Prompt limit = total length − generation length.
+
+## Teacher labels
+
+Default extraction:
 
 ```bash
-# LLaDA: 4096 total tokens, 32-token blocks.
-bash scripts/extract_default_teacher.sh
-
-# Dream: 2048 total tokens, 32-token blocks.
-bash scripts/extract_default_teacher_dream.sh
+scripts/extract_default_teacher.sh          # LLaDA
+scripts/extract_default_teacher_dream.sh    # Dream
 ```
 
-| Training dataset | Samples | Generation tokens | Blocks |
-| --- | ---: | ---: | ---: |
-| MATH, five subjects (`math5s`) | 500 | 256 | 8 |
-| MBPP full (`mbpp_full`) | 371 | 256 | 8 |
-| GovReport (`gov_report`) | 150 | 512 | 16 |
-| Multi-News (`multi_news`) | 100 | 512 | 16 |
-| MuSiQue (`musique`) | 500 | 32 | 1 |
-
-Prompt limits are the model's total budget minus the generation tokens above.
-LLaDA and Dream use separate prompt and teacher directories under `artifacts/`.
-Set `PROMPT_ROOT` or `TEACHER_ROOT` to relocate them. `DATASETS` and `LIMITS`
-override the extraction datasets and sample counts. `PER_HEAD=1` produces
-per-KV-head labels; use a separate teacher directory for each label variant.
-
-## Student training
+Extract one dataset:
 
 ```bash
-bash scripts/train_default_student.sh
-bash scripts/train_default_student_dream.sh
+DATASETS=math5s LIMITS=500 scripts/extract_default_teacher.sh
+DATASETS=math5s LIMITS=500 scripts/extract_default_teacher_dream.sh
 ```
 
-Training freezes the base model and fits the cache scorer with listwise and
-pairwise ranking losses. Validation selects `artifacts/ckpts/<run>/checkpoint-best`.
-The default scripts use 10 epochs, learning rate `2e-4`, and the five domains
-listed above. Override `EPOCHS`, `LR`, `RUN_NAME`, `TEACHER_ROOT`, and
-`MAX_SHARDS` as needed. Always train against the same base model and labels.
+Extraction and training use total lengths of 4096 for LLaDA and 2048 for Dream, with separate artifact directories.
+
+## Training
+
+```bash
+scripts/train_default_student.sh          # LLaDA
+scripts/train_default_student_dream.sh    # Dream
+```
+
+Train on one dataset:
+
+```bash
+python student/train_student.py \
+  --model model/LLaDA-8B-Instruct \
+  --teacher-root artifacts/teacher/math5s \
+  --max-seq-len 4096 --block-length 32
+```
 
 ## Inference
 
-Generative tasks use lm-eval: GSM8K, MATH, MATH-500, HumanEval, MBPP, BBH, and
-the 16 LongBench tasks in `eval/tasks/longbench/`.
-
 ```bash
-# Trained scorer; keep 10% of the external cache.
-bash scripts/run_eval.sh gsm8k 0.1 artifacts/ckpts/<run>/checkpoint-best
+scripts/run_eval.sh <dataset> <keep_ratio> [checkpoint]
 
-# Full cache; no scorer checkpoint required.
-bash scripts/run_eval.sh gsm8k 1.0
+scripts/run_eval.sh samsum 0.1 artifacts/ckpts/<run>/checkpoint-best
+scripts/run_eval.sh gsm8k 1.0    # Full cache; no checkpoint required
 
-# Dream uses its own model, scorer, and 2048-token total budget.
 FUTURE_DLLM_MODEL="$PWD/model/Dream-v0-Instruct-7B" \
-  bash scripts/run_eval.sh gov_report 0.1 artifacts/ckpts/<dream-run>/checkpoint-best
+  scripts/run_eval.sh gsm8k 0.1 artifacts/ckpts/<dream-run>/checkpoint-best
+
+LIMIT=200 scripts/run_eval.sh math 0.1 artifacts/ckpts/<run>/checkpoint-best
 ```
 
-**ARC-Challenge, PIQA, and GPQA use OpenCompass generation and accuracy scoring.**
-They never use lm-eval loglikelihood in this repository. ARC-Challenge uses the
-test split (OpenCompass retains four-choice questions), PIQA uses validation,
-and GPQA uses diamond with five fixed demonstrations.
+OpenCompass — ARC-Challenge, PIQA, and GPQA:
 
 ```bash
-# All three multiple-choice tasks, one model at a time.
-bash scripts/run_oc_mc.sh llada 0.1 artifacts/ckpts/<llada-run>/checkpoint-best
-bash scripts/run_oc_mc.sh dream 0.1 artifacts/ckpts/<dream-run>/checkpoint-best
-
-# Full cache, or a single task.
-bash scripts/run_oc_mc.sh llada 1.0
-bash scripts/run_oc_mc.sh dream 1.0 "" arc_c
-
-# This entry point also routes the three tasks to OpenCompass.
-bash scripts/run_eval.sh piqa 0.1 artifacts/ckpts/<llada-run>/checkpoint-best
+scripts/run_oc_mc.sh llada 0.1 artifacts/ckpts/<llada-run>/checkpoint-best
+scripts/run_oc_mc.sh dream 0.1 artifacts/ckpts/<dream-run>/checkpoint-best
+scripts/run_oc_mc.sh llada 1.0    # Full cache
 ```
-
-`LIMIT=2` runs a small subset. `DRY_RUN=1` on `run_oc_mc.sh` writes the resolved
-configuration without loading a model. Results are stored under `results/` and
-logs under `logs/`. `LOG_SAMPLES=1` saves lm-eval generations. For interrupted
-lm-eval runs, set `FUTURE_DLLM_RESUME` to the previous run's `resume.jsonl`.
-HumanEval and MBPP execute generated Python during scoring.
-
-## Code layout
-
-- `teacher/`: prompt preparation and teacher-label extraction.
-- `student/`: scorer training and checkpoint selection.
-- `future_dllm/`: model backends, cache scorer, and block decoding.
-- `eval/`: generative lm-eval integration and local task definitions.
-- `eval_oc/`: OpenCompass integration for the three multiple-choice tasks.
-- `scripts/`: data preparation and extraction, training, and inference launchers.
