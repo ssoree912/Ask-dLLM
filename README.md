@@ -1,10 +1,8 @@
 # Ask-dLLM
 
-KV cache eviction for diffusion LLMs, ranking cache entries by what the completed answer needs.
+Diffusion large language models (dLLMs) incur substantial computation and memory costs through repeated bidirectional attention. Temporal caching reduces redundant KV recomputation but retains full-sequence KV states, while current-attention-based eviction may discard entries needed after denoising. We introduce Ask-dLLM, a KV cache eviction framework that predicts denoised-state relevance conditioned on the current masked block. A lightweight scorer learns from the same frozen dLLM’s denoised-state relevance and ranks external cache candidates once per block using masked-state representations. Across 23 reasoning, code, and long-context benchmarks, retaining only 10% of external KV entries improves the average score over the strongest prior eviction baseline by 7.75 points on LLaDA and 2.39 points on Dream, while remaining within approximately 0.92 points of the unmodified Origin model on both backbones. On four LongBench datasets at an 8K context length, Ask-dLLM achieves approximately 9.7× and 11.8× the throughput of Origin on LLaDA and Dream, respectively, while matching or exceeding its average task score.
 
 Models: [LLaDA-8B-Instruct](https://huggingface.co/GSAI-ML/LLaDA-8B-Instruct) / [Dream-v0-Instruct-7B](https://huggingface.co/Dream-org/Dream-v0-Instruct-7B).
-
-Compact PyTorch reference algorithms for teacher extraction, student training, and cache eviction. Full model integration and benchmark runners are on [dev](https://github.com/ssoree912/Ask-dLLM/tree/dev).
 
 ## Installation
 
@@ -12,16 +10,11 @@ Compact PyTorch reference algorithms for teacher extraction, student training, a
 pip install -r requirements.txt
 ```
 
-## Core algorithms
+## Code
 
-```text
-Ask-dLLM/
-├── teacher/extract_teacher.py   # Completed-block attention targets
-├── student/train_student.py     # Block-conditioned scorer and ranking loss
-└── inference/generate.py        # Block-wise top-K cache selection
-```
-
-Model-specific forward passes and token-reveal schedules are supplied through the `Decoder` interface in `inference/generate.py`.
+- [Teacher extraction](teacher/extract_teacher.py)
+- [Training](student/train_student.py)
+- [Inference](inference/generate.py)
 
 ## Evaluation datasets
 
@@ -54,15 +47,3 @@ ARC-Challenge, PIQA, and GPQA use **OpenCompass generative evaluation**. Other t
 | [musique](https://huggingface.co/datasets/dgslibisey/MuSiQue) | 500 | 32 | 4064 | 2016 | 1 |
 
 Teacher blocks = generation length / 32. Prompt limit = total length − generation length.
-
-## Teacher labels
-
-[extract_teacher.py](teacher/extract_teacher.py) decodes with the full cache, saves the state before step 1, and computes attention targets from the completed block. Labels take the maximum attention over block rows after averaging heads, with an optional per-KV-head reduction.
-
-## Training
-
-[train_student.py](student/train_student.py) replays the frozen model at selection time. Each layer scores `[token; mean block; token × mean block]` projections using an MLP, trained with listwise KL and pairwise ranking losses.
-
-## Inference
-
-[generate.py](inference/generate.py) selects the top-K external cache entries during step 1 and uses them for the remaining block steps. The current 32-token block stays available; `keep_ratio=1.0` retains the full cache. A fresh cache is built for each block.
