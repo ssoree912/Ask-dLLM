@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv*/
+.hf_cache/
+.oc_cache/
+model/
+data/
+artifacts/
+results/
+logs/
