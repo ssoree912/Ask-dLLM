@@ -1,6 +1,6 @@
 """Teacher labels from the finished answer: final x row-max.
 
-For each block the extractor lets the block fill in with the full cache, then
+For each block the extractor lets the block fill in without eviction, then
 runs one extra forward on the completed block and reads what those answer tokens
 attend to. The label is the per-candidate maximum over the block's rows
 

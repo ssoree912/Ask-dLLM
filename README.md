@@ -21,12 +21,12 @@ Ask-dLLM/
 │   ├── LLaDA-8B-Instruct/
 │   └── Dream-v0-Instruct-7B/
 ├── data/
-│   ├── eval/<name>/           # Evaluation parquet files
-│   ├── train/<name>/          # Training parquet/JSONL files
-│   ├── longbench/data/       # LongBench JSONL files
-│   └── gpqa/                 # OpenCompass GPQA CSV files
-├── artifacts/                # Prompt shards, teacher labels, checkpoints
-└── results/                  # Evaluation results
+│   ├── eval/<name>/
+│   ├── train/<name>/
+│   ├── longbench/data/
+│   └── gpqa/
+├── artifacts/
+└── results/
 ```
 
 OpenCompass setup:
@@ -114,7 +114,6 @@ python student/train_student.py \
 scripts/run_eval.sh <dataset> <keep_ratio> [checkpoint]
 
 scripts/run_eval.sh samsum 0.1 artifacts/ckpts/<run>/checkpoint-best
-scripts/run_eval.sh gsm8k 1.0    # Full cache; no checkpoint required
 
 FUTURE_DLLM_MODEL="$PWD/model/Dream-v0-Instruct-7B" \
   scripts/run_eval.sh gsm8k 0.1 artifacts/ckpts/<dream-run>/checkpoint-best
@@ -127,6 +126,4 @@ OpenCompass — ARC-Challenge, PIQA, and GPQA:
 ```bash
 scripts/run_oc_mc.sh llada 0.1 artifacts/ckpts/<llada-run>/checkpoint-best
 scripts/run_oc_mc.sh dream 0.1 artifacts/ckpts/<dream-run>/checkpoint-best
-scripts/run_oc_mc.sh llada 1.0    # Full cache
-scripts/run_oc_mc.sh dream 1.0    # Full cache
 ```

@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# Fetch the OpenCompass datasets that its own auto-download cannot resolve.
-#
-# OpenCompass downloads most sets on first use, but two in this suite fall
-# through: `opencompass/piqa` has no entry in DATASETS_URL (the archive exists
-# on their mirror, it is just not in the table), and GPQA is gated on the Hub so
-# it has to come from an authenticated download. Fetching them here keeps the
-# installed OpenCompass tree vanilla -- no edits to datasets_info.py.
-#
-#   scripts/fetch_oc_data.sh
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,8 +15,6 @@ else
   ( cd "$CACHE" && unzip -oq piqa.zip && rm -f piqa.zip )
 fi
 
-# GPQA's config reads ./data/gpqa/ relative to the working directory, so this
-# one lives in the repo rather than the shared cache.
 if [[ -f "$REPO/data/gpqa/gpqa_diamond.csv" ]]; then
   echo "gpqa   already present"
 else

@@ -1,9 +1,4 @@
 #!/usr/bin/env python
-"""Download datasets into the local layout used by training and evaluation.
-
-The runtime scripts default to offline mode. Run this once in an online
-environment, then share the resulting data directory together with the repo.
-"""
 
 from __future__ import annotations
 
@@ -21,7 +16,6 @@ from datasets import Dataset, DatasetDict, load_dataset
 from huggingface_hub import hf_hub_download
 
 
-# The 27 BIG-Bench Hard tasks, in lm-eval's own order (tasks/bbh/cot_fewshot/_bbh.yaml).
 BBH_TASKS = (
     "boolean_expressions", "causal_judgement", "date_understanding",
     "disambiguation_qa", "dyck_languages", "formal_fallacies",
@@ -77,7 +71,6 @@ def _load(repo: str, config: str | None = None, **kwargs) -> DatasetDict | Datas
 
 
 def _fetch(url: str, name: str) -> Path:
-    """Download an upstream archive into the throwaway cache, once."""
     root = (HF_CACHE or Path(".hf_cache").resolve()) / "upstream"
     root.mkdir(parents=True, exist_ok=True)
     dest = root / name
@@ -90,14 +83,9 @@ def _fetch(url: str, name: str) -> Path:
 
 
 def _hf_download(repo: str, filename: str, repo_type: str = "dataset") -> str:
-    """hf_hub_download, but fall back to curl when it fails.
-
-    huggingface_hub streams over requests/HTTP1.1; on some networks the HF CDN resets
-    the chunked transfer for large LFS files mid-stream (IncompleteRead at 0 bytes).
-    curl negotiates HTTP/2 and resumes, so retry the resolved URL through it."""
     try:
         return hf_hub_download(repo, filename, repo_type=repo_type)
-    except Exception as exc:  # network/protocol failure, not a missing file
+    except Exception as exc:
         from huggingface_hub import hf_hub_url
         url = hf_hub_url(repo, filename, repo_type=repo_type)
         root = (HF_CACHE or Path(".hf_cache").resolve()) / "upstream"
@@ -114,7 +102,6 @@ def _hf_download(repo: str, filename: str, repo_type: str = "dataset") -> str:
 
 
 def _multi_news(split: str) -> Dataset:
-    """Multi-News from the raw files the loader script read, with its newline fix."""
     src = hf_hub_download(MULTI_NEWS_REPO, f"data/{split}.src.cleaned", repo_type="dataset")
     tgt = hf_hub_download(MULTI_NEWS_REPO, f"data/{split}.tgt", repo_type="dataset")
     with open(src, encoding="utf-8") as src_f, open(tgt, encoding="utf-8") as tgt_f:
@@ -159,13 +146,6 @@ def download_eval(root: Path) -> None:
 
 
 def download_bbh(root: Path) -> None:
-    """BIG-Bench Hard, one parquet per task.
-
-    lm-eval's bbh tasks read SaylorTwift/bbh, a mirror that adds a `default`
-    config on top of the original 27; the rows are the same, so the canonical
-    lukaemon/bbh is used here and the 27 configs are written out one file each,
-    the way eval/tasks/generate_local_bbh.py expects to find them.
-    """
     rows = {}
     for name in BBH_TASKS:
         ds = _load("lukaemon/bbh", name)
@@ -239,9 +219,6 @@ def download_train(root: Path) -> None:
 
 
 def download_longbench(root: Path) -> None:
-    """The repo's loader script cannot run under datasets 5.0, but the same repo also
-    holds data.zip -- the official release, one jsonl per task, already in the layout
-    the eval tasks read."""
     archive = _hf_download("zai-org/LongBench", "data.zip")
     dst = root / "longbench/data"
     dst.mkdir(parents=True, exist_ok=True)
@@ -257,7 +234,6 @@ def download_longbench(root: Path) -> None:
 
 
 class _Tee:
-    """Mirror stdout/stderr to a log file, matching the shell scripts' `tee` behaviour."""
 
     def __init__(self, stream, log_fh):
         self._stream = stream
@@ -275,7 +251,6 @@ class _Tee:
 
 
 def _start_logging() -> Path:
-    """Tee this run into logs/download/download_<date>.log."""
     log_dir = Path(__file__).resolve().parents[1] / "logs" / "download"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"download_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"

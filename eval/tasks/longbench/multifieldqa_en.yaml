@@ -1,5 +1,3 @@
-# Generated from LongBench's own config/dataset2prompt.json and
-# config/dataset2maxlen.json, against the official zai-org/LongBench data.
 tag:
   - longbench_single_tasks
   - longbench_tasks

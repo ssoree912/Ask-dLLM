@@ -32,8 +32,6 @@ gpqa_eval_cfg = dict(
 
 gpqa_datasets = []
 gpqa_subsets = {
-    # 'extended': 'gpqa_extended.csv',
-    # 'main': 'gpqa_main.csv',
     'diamond': 'gpqa_diamond.csv'
 }
 

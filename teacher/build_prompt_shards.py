@@ -1,10 +1,3 @@
-"""Build prompt shards from non-test data for teacher extraction.
-
-The datasets span long-context tasks and reasoning tasks with different prompt
-fractions P/(P+32b). LongBench prompts use raw text; other tasks use the model's
-chat template. Prompts are left-truncated after reserving the generation budget.
-"""
-
 from __future__ import annotations
 
 import argparse, glob, json, os, sys
@@ -24,7 +17,6 @@ MATH_INSTRUCTION = ("Please reason step by step, and put your final answer withi
 
 
 def _drop_test_overlap(table, column, test_glob):
-    """Drop training descriptions that also occur in the evaluation split."""
     import pandas as pd, re
     frames = [pd.read_parquet(f) for f in sorted(glob.glob(str(test_glob)))]
     if not frames:
@@ -39,11 +31,6 @@ def _drop_test_overlap(table, column, test_glob):
 
 
 def _balanced(table, columns, limit, seed=0):
-    """Take `limit` rows spread evenly over the sub-categories.
-
-    Taking one shuffled row from each group in turn covers all categories.
-    A group that runs out drops out of the rotation.
-    """
     import pandas as pd
     if not columns or not all(c in table.columns for c in columns):
         return table.sample(frac=1.0, random_state=seed).head(limit)
@@ -64,7 +51,6 @@ def _balanced(table, columns, limit, seed=0):
 
 
 def gsm8k(limit):
-    """Shuffle uniformly because this dataset has no category axis."""
     import pandas as pd
     table = _balanced(pd.read_parquet(DATA / "train/gsm8k/train.parquet"), [], limit)
     return [(f"gsm8k-{i}", f"{row.question}\n\n{MATH_INSTRUCTION}")
@@ -72,7 +58,6 @@ def gsm8k(limit):
 
 
 def musique(limit):
-    """Rebuild the LongBench MuSiQue prompt from training paragraphs: 32 tokens, one block."""
     import random
     rows = [json.loads(l) for l in open(DATA / "train/musique/musique_ans_v1.0_train.jsonl")]
     random.Random(0).shuffle(rows)
@@ -90,7 +75,6 @@ def musique(limit):
 
 
 def gov_report(limit):
-    """Rebuild the LongBench GovReport prompt from training reports: 512 tokens, 16 blocks."""
     import pandas as pd
     table = pd.read_parquet(DATA / "train/gov_report/train.parquet")
     table = table.sample(frac=1.0, random_state=0).head(limit)
@@ -102,7 +86,6 @@ def gov_report(limit):
 
 
 def multi_news(limit):
-    """Rebuild the LongBench Multi-News prompt from training documents: 512 tokens, 16 blocks."""
     import pandas as pd
     table = pd.read_parquet(DATA / "train/multi_news/train.parquet")
     table = table.sample(frac=1.0, random_state=0).head(limit)
@@ -114,11 +97,10 @@ def multi_news(limit):
 
 
 def math(limit):
-    """MATH-500 is drawn from the test split, so the training split does not overlap."""
     import pandas as pd
     frames = [pd.read_parquet(f) for f
               in sorted(glob.glob(str(DATA / "train/hendrycks_math/*/train-*.parquet")))]
-    table = _balanced(pd.concat(frames), ["type", "level"], limit)  # 7 x 5 cells
+    table = _balanced(pd.concat(frames), ["type", "level"], limit)
     return [(f"math-{i}", f"{row.problem}\n\n{MATH_INSTRUCTION}")
             for i, row in enumerate(table.itertuples())]
 
@@ -127,8 +109,6 @@ MATH5S_TRAIN = ["Prealgebra", "Algebra", "Geometry", "Number Theory", "Precalcul
 
 
 def _math_subjects(subjects, limit, prefix):
-    """Filter problems containing [asy] diagram code before splitting subjects.
-    Select the requested subjects and balance their difficulty levels."""
     import pandas as pd
     frames = [pd.read_parquet(f) for f
               in sorted(glob.glob(str(DATA / "train/hendrycks_math/*/train-*.parquet")))]
@@ -161,7 +141,6 @@ BUILDERS = {
     "multi_news": multi_news, "musique": musique, "gsm8k": gsm8k, "math": math,
 }
 
-# LongBench evaluation uses raw text without a chat template.
 RAW_TEXT = {"musique", "gov_report", "multi_news"}
 
 
@@ -206,7 +185,6 @@ def main():
 
     chat = (args.dataset not in RAW_TEXT) if args.chat_template < 0 else bool(args.chat_template)
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    # Reserve generation space and keep the end of the prompt, as in evaluation.
     tok.truncation_side = "left"
     out = Path(args.out_root) / args.dataset
     out.mkdir(parents=True, exist_ok=True)
