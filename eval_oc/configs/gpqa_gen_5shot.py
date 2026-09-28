@@ -5,7 +5,7 @@ from opencompass.openicl.icl_evaluator import AccEvaluator
 from opencompass.datasets import GPQADataset
 from opencompass.utils.text_postprocessors import first_capital_postprocess
 
-hint = f'For the multiple choice question below, please provide the correct answer option directly.'
+hint = 'For the multiple choice question below, please provide the correct answer option directly.'
 
 gpqa_reader_cfg = dict(
     input_columns=['question', 'A', 'B', 'C', 'D'],
@@ -40,7 +40,7 @@ for split in list(gpqa_subsets.keys()):
         dict(
             abbr='GPQA_' + split + '_5shot',
             type=GPQADataset,
-            path='./data/gpqa/',
+            path='data/eval/gpqa',
             name=gpqa_subsets[split],
             reader_cfg=gpqa_reader_cfg,
             infer_cfg=gpqa_infer_cfg,

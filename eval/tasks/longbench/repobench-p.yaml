@@ -5,7 +5,7 @@ task: longbench_repobench-p
 dataset_path: json
 dataset_kwargs:
   data_files:
-    test: LONGBENCH_DATA_DIR/repobench-p.jsonl
+    test: DATA_DIR/eval/longbench/repobench-p.jsonl
 test_split: test
 doc_to_text: "Please complete the code given below. \n{{context}}{{input}}Next line of code:\n"
 doc_to_target: '{{answers}}'

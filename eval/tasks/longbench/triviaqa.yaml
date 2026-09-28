@@ -5,7 +5,7 @@ task: longbench_triviaqa
 dataset_path: json
 dataset_kwargs:
   data_files:
-    test: LONGBENCH_DATA_DIR/triviaqa.jsonl
+    test: DATA_DIR/eval/longbench/triviaqa.jsonl
 test_split: test
 doc_to_text: "Answer the question based on the given passage. Only give me the answer and do not output any other words. The following are some examples.\n\n{{context}}\n\n{{input}}"
 doc_to_target: '{{answers}}'

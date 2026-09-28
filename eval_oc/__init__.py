@@ -1,4 +1,3 @@
-from .llada_model import LLaDAFutureOC
-from .model import DreamFutureOC
+from .models import DreamOC, LLaDAOC
 
-__all__ = ["DreamFutureOC", "LLaDAFutureOC"]
+__all__ = ["DreamOC", "LLaDAOC"]

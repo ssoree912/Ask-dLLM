@@ -5,7 +5,7 @@ task: longbench_2wikimqa
 dataset_path: json
 dataset_kwargs:
   data_files:
-    test: LONGBENCH_DATA_DIR/2wikimqa.jsonl
+    test: DATA_DIR/eval/longbench/2wikimqa.jsonl
 test_split: test
 doc_to_text: "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{{context}}\n\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {{input}}\nAnswer:"
 doc_to_target: '{{answers}}'

@@ -5,7 +5,7 @@ task: longbench_multi_news
 dataset_path: json
 dataset_kwargs:
   data_files:
-    test: LONGBENCH_DATA_DIR/multi_news.jsonl
+    test: DATA_DIR/eval/longbench/multi_news.jsonl
 test_split: test
 doc_to_text: "You are given several news passages. Write a one-page summary of all news. \n\nNews:\n{{context}}\n\nNow, write a one-page summary of all the news.\n\nSummary:"
 doc_to_target: '{{answers}}'

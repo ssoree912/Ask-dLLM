@@ -5,7 +5,7 @@ task: longbench_qmsum
 dataset_path: json
 dataset_kwargs:
   data_files:
-    test: LONGBENCH_DATA_DIR/qmsum.jsonl
+    test: DATA_DIR/eval/longbench/qmsum.jsonl
 test_split: test
 doc_to_text: "You are given a meeting transcript and a query containing a question or instruction. Answer the query in one or more sentences.\n\nTranscript:\n{{context}}\n\nNow, answer the query based on the above meeting transcript in one or more sentences.\n\nQuery: {{input}}\nAnswer:"
 doc_to_target: '{{answers}}'
