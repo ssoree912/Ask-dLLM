@@ -479,7 +479,7 @@ def alibi_attention_bias(seq_len: int, config: ModelConfig, device: torch.device
 
     return alibi_bias * (1.0 / (2 ** m.view(1, config.n_heads, 1, 1)))  # type: ignore
 
-from .cache import CustomCache, sparse_dllm_current_score  # noqa: E402,F401
+from .cache import CustomCache  # noqa: E402
 
 
 

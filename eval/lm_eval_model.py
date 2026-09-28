@@ -14,9 +14,12 @@ from lm_eval.api.registry import register_model
 from lm_eval.models.huggingface import HFLM
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL = REPO_ROOT / "model" / "LLaDA-8B-Instruct"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from ask_dllm import detect_family, load_model, load_student  # noqa: E402
+from ask_dllm.dream_decoding import (  # noqa: E402
+    DreamDecoding, require_matching_decoding, sample_seed)
 
 
 def _generation_kwargs(raw: dict, default_max_gen_toks: int, dream_decoding=None) -> dict:
@@ -32,11 +35,11 @@ def _generation_kwargs(raw: dict, default_max_gen_toks: int, dream_decoding=None
     return out
 
 
-@register_model("LLaDA_future", "Dream_future")
-class FutureDLLM(HFLM):
+@register_model("ask_dllm")
+class AskDLLM(HFLM):
     def __init__(
         self,
-        pretrained: str = str(DEFAULT_MODEL),
+        pretrained: str,
         keep_ratio: float = 1.0,
         block_len: int = 32,
         max_seq_len: int = None,
@@ -47,10 +50,10 @@ class FutureDLLM(HFLM):
         dream_top_p: float = 0.95,
         dream_steps: int = 512,
         dream_seed: int = 0,
+        resume: str = "",
         show_speed: bool = True,
         **kwargs,
     ):
-        from future_dllm import detect_family, load_model, load_prompt_utility_student
         family = detect_family(pretrained)
         self._block_len = int(block_len)
         self._max_seq_len = int(max_seq_len) if max_seq_len is not None else (
@@ -59,6 +62,7 @@ class FutureDLLM(HFLM):
         self._keep_ratio = float(keep_ratio)
         self._show_speed = bool(show_speed)
         self._dream_seed = int(dream_seed)
+        self._resume_path = str(resume)
         if not 0.0 < self._keep_ratio <= 1.0:
             raise ValueError("keep_ratio must be in (0, 1]")
         if self._block_len < 1 or self._max_seq_len < 1:
@@ -75,7 +79,6 @@ class FutureDLLM(HFLM):
         self._fallback_mask_id = self._backend.mask_id
         self._dream_decoding = None
         if family == "dream":
-            from future_dllm.dream_decoding import DreamDecoding
             self._dream_decoding = DreamDecoding(
                 alg=dream_alg, temperature=float(dream_temperature),
                 top_p=float(dream_top_p), steps=int(dream_steps))
@@ -91,11 +94,10 @@ class FutureDLLM(HFLM):
         self._scorer = None
         if student_path and self._keep_ratio < 1.0:
             if self._dream_decoding is not None:
-                from future_dllm.dream_decoding import require_matching_decoding
                 path = Path(student_path) / "decoding.json"
                 saved = json.loads(path.read_text()) if path.is_file() else None
                 require_matching_decoding(saved, self._dream_decoding.metadata(), path)
-            self._scorer = load_prompt_utility_student(student_path, device)
+            self._scorer = load_student(student_path, device)
         tokenizer_mask = getattr(self.tokenizer, "mask_token_id", None)
         if tokenizer_mask is not None and int(tokenizer_mask) != self._backend.mask_id:
             raise RuntimeError("tokenizer and model mask token IDs disagree")
@@ -116,21 +118,20 @@ class FutureDLLM(HFLM):
 
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
         raise NotImplementedError(
-            "Use OpenCompass for ARC-Challenge, PIQA, and GPQA: scripts/run_oc_mc.sh")
+            "multiple-choice tasks (ARC-C, PIQA, GPQA, MMLU) run through OpenCompass")
 
     def loglikelihood_rolling(self, requests: List[Instance]) -> List[float]:
         raise NotImplementedError("This evaluator supports generation only")
 
     def _call_generate(self, context_enc, gen_kwargs, gen_length):
         if self._dream_decoding is not None:
-            from future_dllm.dream_decoding import sample_seed
             seed = sample_seed(self._dream_seed, repr(context_enc.tolist()))
             with torch.random.fork_rng():
                 torch.manual_seed(seed)
                 return self._generate(
                     self.model, context_enc.to(self.device), gen_length=gen_length,
                     block_length=self._block_len, mask_id=self._mask_id,
-                    cache_scorer=self._scorer, eviction_method="student",
+                    cache_scorer=self._scorer,
                     **self._dream_decoding.generation_kwargs(gen_length))
         return self._generate(
             self.model, context_enc.to(self.device),
@@ -139,13 +140,13 @@ class FutureDLLM(HFLM):
             temperature=float(gen_kwargs.get("temperature", 0.0)),
             cfg_scale=float(gen_kwargs.get("cfg_scale", 0.0)),
             remasking=gen_kwargs.get("remasking") or "low_confidence",
-            cache_scorer=self._scorer, eviction_method="student")
+            cache_scorer=self._scorer)
 
     @torch.no_grad()
     def generate_until(self, requests: List[Instance], disable_tqdm: bool = False) -> List[str]:
         from tqdm import tqdm
 
-        store_path = os.environ.get("FUTURE_DLLM_RESUME", "")
+        store_path = self._resume_path
         done, store = {}, None
         if store_path:
             if os.path.exists(store_path):
@@ -158,7 +159,7 @@ class FutureDLLM(HFLM):
                         done[rec["key"]] = rec["text"]
             os.makedirs(os.path.dirname(store_path) or ".", exist_ok=True)
             store = open(store_path, "a")
-            print(f"[{self._backend.name}_future] resume store: "
+            print(f"[ask_dllm] resume store: "
                   f"{len(done)} answers on disk", flush=True)
 
         results = []
@@ -166,7 +167,7 @@ class FutureDLLM(HFLM):
         measured_tokens = 0
         measured_answers = 0
         bar = tqdm(total=len(requests), disable=(disable_tqdm or self.rank != 0),
-                   desc="future_dllm generate_until")
+                   desc="ask_dllm generate_until")
         for request in requests:
             context, raw_kwargs = request.args
             key = hashlib.md5(
@@ -214,7 +215,7 @@ class FutureDLLM(HFLM):
             store.close()
         if self._show_speed and measured_answers:
             print(
-                f"[{self._backend.name}_future] generated {measured_answers} answers, "
+                f"[ask_dllm] generated {measured_answers} answers, "
                 f"{measured_tokens} decoded tokens in {measured_seconds:.1f}s "
                 f"({measured_tokens / measured_seconds:.2f} tok/s)",
                 flush=True,

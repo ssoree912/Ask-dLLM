@@ -1,3 +1,5 @@
+'Extract teacher labels: the attention each finished block pays to its cached candidates.'
+
 from __future__ import annotations
 
 import argparse
@@ -10,30 +12,32 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_length import resolve as resolve_gen_length
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from ask_dllm import CustomCache, detect_family, load_model  # noqa: E402
+from ask_dllm.dream_decoding import (  # noqa: E402
+    DreamDecoding, add_dream_arguments, require_matching_decoding, sample_seed)
+from ask_dllm.llada_generate import add_gumbel_noise, get_num_transfer_tokens  # noqa: E402
+from teacher.build_prompt_shards import GEN_LENGTH  # noqa: E402
 
 
-def parse_args(family, description):
-    p = argparse.ArgumentParser(description=description)
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", required=True,
-                   help=f"path to the {family} checkpoint to label with. Required "
-                        f"on purpose: teacher labels are only meaningful for the "
-                        f"model that produced them, so the run always says which "
-                        f"one it used")
+                   help="LLaDA or Dream checkpoint to label with; teacher labels are "
+                        "only meaningful for the model that produced them")
     p.add_argument("--dataset", required=True,
                    help="prompt shard directory name, e.g. math5s / mbpp_full / musique")
-    p.add_argument("--shard-root", default=str(REPO_ROOT / "artifacts" / "prompt_shards"))
-    p.add_argument("--output-root", default=str(REPO_ROOT / "artifacts" /
-                   ("teacher_per_head" if family == "llada" else "teacher_dream_per_head")))
+    p.add_argument("--shard-root", required=True,
+                   help="directory written by teacher/build_prompt_shards.py")
+    p.add_argument("--output-root", required=True)
     p.add_argument("--n-samples", type=int, default=300)
     p.add_argument("--gen-length", type=int, default=None,
-                   help="default: the eval task's max_gen_toks, see teacher/gen_length.py")
+                   help="default: GEN_LENGTH[dataset] in teacher/build_prompt_shards.py")
     p.add_argument("--block-length", type=int, default=32)
-    p.add_argument("--max-seq-len", type=int, default=2048 if family == "dream" else 4096,
-                   help="total token budget: LLaDA 4096, Dream 2048")
+    p.add_argument("--max-seq-len", type=int, default=None,
+                   help="total token budget; default LLaDA 4096, Dream 2048")
     p.add_argument("--max-prompt-len", type=int, default=None,
                    help="optional stricter prompt-only cap")
     p.add_argument("--seed", type=int, default=0)
@@ -50,22 +54,17 @@ def parse_args(family, description):
                         "each head keeps its own top-k; costs H times the "
                         "storage, so it writes its own teacher_kind and is "
                         "meant for a separate --output-root")
-    from future_dllm.dream_decoding import add_dream_arguments
     add_dream_arguments(p)
     args = p.parse_args()
 
-    from future_dllm import detect_family
-    found = detect_family(args.model)
-    if found != family:
-        raise SystemExit(
-            f"this script extracts {family} labels, but --model {args.model} is "
-            f"a {found} checkpoint. Use teacher/extract_teacher_{found}.py instead."
-        )
-    args.family = family
-
+    args.family = detect_family(args.model)
+    if args.max_seq_len is None:
+        args.max_seq_len = 2048 if args.family == "dream" else 4096
     if args.gen_length is None:
-        args.gen_length, source = resolve_gen_length(args.dataset)
-        print(f"gen_length {args.gen_length} from {source}", flush=True)
+        if args.dataset not in GEN_LENGTH:
+            raise SystemExit(f"no default generation length for {args.dataset}; "
+                             "pass --gen-length")
+        args.gen_length = GEN_LENGTH[args.dataset]
     if args.gen_length < 1:
         raise SystemExit("--gen-length must be positive")
     if args.block_length < 1:
@@ -91,7 +90,6 @@ def parse_args(family, description):
 def collect(model, prompt_ids, args, backend):
     if backend.name == "dream":
         return collect_dream(model, prompt_ids, args, backend)
-    from future_dllm import CustomCache, add_gumbel_noise, get_num_transfer_tokens
 
     device = model.device
     prompt_ids = prompt_ids[-args.prompt_limit:].to(device).unsqueeze(0)
@@ -138,11 +136,11 @@ def collect(model, prompt_ids, args, backend):
             step(i)
 
         cache.capture_rows = True
-        cache.capture_per_head = bool(getattr(args, "per_head", True))
-        cache.group_reduce = getattr(args, "label_group_reduce", "mean")
+        cache.capture_per_head = args.per_head
+        cache.group_reduce = args.label_group_reduce
         step(S - 1)
         row_axis = 1 if cache.capture_per_head else 0
-        row_reduce = getattr(args, "label_row_reduce", "max")
+        row_reduce = args.label_row_reduce
         label = torch.stack([
             reduce_rows(cache.pending_rows[layer], row_axis, row_reduce)
             for layer in range(L)
@@ -181,16 +179,15 @@ def reduce_rows(rows: torch.Tensor, axis: int, how: str) -> torch.Tensor:
 
 
 def collect_dream(model, prompt_ids, args, backend):
-    from future_dllm.dream_decoding import DreamDecoding
-    from future_dllm.dream_generate import generate
+    from ask_dllm.dream_generate import generate
 
     settings = DreamDecoding.from_args(args)
     prompt = prompt_ids[-args.prompt_limit:].to(model.device).unsqueeze(0)
     records = []
 
-    per_head = bool(getattr(args, "per_head", True))
-    row_reduce = getattr(args, "label_row_reduce", "max")
-    group_reduce = getattr(args, "label_group_reduce", "mean")
+    per_head = args.per_head
+    row_reduce = args.label_row_reduce
+    group_reduce = args.label_group_reduce
 
     def completed(x, cache, block_index, bs, selection_input):
         be = bs + args.block_length
@@ -226,11 +223,9 @@ def collect_dream(model, prompt_ids, args, backend):
     return records
 
 
-def run(family, description):
+def main():
     process_started = time.time()
-    sys.path.insert(0, str(REPO_ROOT))
-    args = parse_args(family, description)
-    from future_dllm import load_model
+    args = parse_args()
 
     model, backend = load_model(args.model, max_seq_len=args.max_seq_len,
                                 block_length=args.block_length, keep_ratio=1.0)
@@ -241,15 +236,13 @@ def run(family, description):
           f"mask_id={backend.mask_id} logit_shift={backend.logit_shift} "
           f"seed_block_start={backend.seed_block_start}", flush=True)
     decoding = None
-    if family == "dream":
-        from future_dllm.dream_decoding import (
-            DreamDecoding, require_matching_decoding, sample_seed)
+    if args.family == "dream":
         decoding = DreamDecoding.from_args(args).metadata()
         print(f"decoding={decoding} seed={args.seed}", flush=True)
 
-    per_head = bool(getattr(args, "per_head", True))
-    row_reduce = getattr(args, "label_row_reduce", "max")
-    group_reduce = getattr(args, "label_group_reduce", "mean")
+    per_head = args.per_head
+    row_reduce = args.label_row_reduce
+    group_reduce = args.label_group_reduce
     teacher_kind = f"final_row{row_reduce}" + ("_per_head" if per_head else "")
     if per_head and group_reduce != "max":
         teacher_kind += f"_group{group_reduce}"
@@ -332,9 +325,4 @@ def run(family, description):
 
 
 if __name__ == "__main__":
-    raise SystemExit(
-        "extract_teacher.py holds the shared implementation and is not runnable "
-        "on its own -- the family decides the mask token, the logit shift and "
-        "the step-0 seed. Use teacher/extract_teacher_llada.py or "
-        "teacher/extract_teacher_dream.py."
-    )
+    raise SystemExit(main())

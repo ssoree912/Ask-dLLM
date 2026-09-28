@@ -5,14 +5,16 @@ from __future__ import annotations
 import argparse, glob, json, os, sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA = Path(os.environ.get("FUTURE_DLLM_DATA", REPO_ROOT / "data"))
-
 import torch
 from transformers import AutoTokenizer
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_length import resolve as resolve_gen_length
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+DATA = REPO_ROOT / "data"
+
+# Generation length per training set, matching the eval task it stands in for.
+GEN_LENGTH = {"math5s": 256, "mbpp_full": 256, "gov_report": 512,
+              "multi_news": 512, "musique": 32}
 
 MATH_INSTRUCTION = ("Please reason step by step, and put your final answer within "
                     "\\boxed{}.")
@@ -50,13 +52,6 @@ def _balanced(table, columns, limit, seed=0):
             if not groups:
                 break
     return pd.DataFrame(out[:limit])
-
-
-def gsm8k(limit):
-    import pandas as pd
-    table = _balanced(pd.read_parquet(DATA / "train/gsm8k/train.parquet"), [], limit)
-    return [(f"gsm8k-{i}", f"{row.question}\n\n{MATH_INSTRUCTION}")
-            for i, row in enumerate(table.itertuples())]
 
 
 def musique(limit):
@@ -98,15 +93,6 @@ def multi_news(limit):
             for i, row in enumerate(table.itertuples())]
 
 
-def math(limit):
-    import pandas as pd
-    frames = [pd.read_parquet(f) for f
-              in sorted(glob.glob(str(DATA / "train/hendrycks_math/*/train-*.parquet")))]
-    table = _balanced(pd.concat(frames), ["type", "level"], limit)
-    return [(f"math-{i}", f"{row.problem}\n\n{MATH_INSTRUCTION}")
-            for i, row in enumerate(table.itertuples())]
-
-
 MATH5S_TRAIN = ["Prealgebra", "Algebra", "Geometry", "Number Theory", "Precalculus"]
 
 
@@ -140,13 +126,14 @@ def mbpp_full(limit):
 
 BUILDERS = {
     "math5s": math5s, "mbpp_full": mbpp_full, "gov_report": gov_report,
-    "multi_news": multi_news, "musique": musique, "gsm8k": gsm8k, "math": math,
+    "multi_news": multi_news, "musique": musique,
 }
 
 RAW_TEXT = {"musique", "gov_report", "multi_news"}
 
 
 def main():
+    global DATA
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset", choices=sorted(BUILDERS), required=True)
     p.add_argument("--limit", type=int, default=300)
@@ -160,22 +147,21 @@ def main():
     p.add_argument("--max-seq-len", type=int, default=None,
                    help="total token budget: LLaDA 4096, Dream 2048")
     p.add_argument("--gen-length", type=int, default=None,
-                   help="default: the matching eval task's generation budget")
+                   help="default: GEN_LENGTH[dataset]")
     p.add_argument("--chat-template", type=int, default=-1,
                    help="-1 selects the dataset default (disabled for LongBench)")
+    p.add_argument("--data-root", default=str(DATA))
     p.add_argument("--out-root", default=str(REPO_ROOT / "artifacts" / "prompt_shards"))
     args = p.parse_args()
+    DATA = Path(args.data_root)
 
     if args.max_seq_len is None:
-        sys.path.insert(0, str(REPO_ROOT))
-        from future_dllm import detect_family
+        from ask_dllm import detect_family
         args.max_seq_len = 2048 if detect_family(args.model) == "dream" else 4096
     if args.max_seq_len < 1:
         raise SystemExit("--max-seq-len must be positive")
     if args.gen_length is None:
-        args.gen_length, gen_source = resolve_gen_length(args.dataset)
-    else:
-        gen_source = "--gen-length"
+        args.gen_length = GEN_LENGTH[args.dataset]
     if args.gen_length < 1:
         raise SystemExit("--gen-length must be positive")
     prompt_limit = args.max_seq_len - args.gen_length
@@ -217,8 +203,7 @@ def main():
         os.replace(temporary, target)
     n = len(list(out.glob("*.pt")))
     print(f"{args.dataset}: {n} shards total, {added} new, {rebuilt} rebuilt "
-          f"(prompt_limit={prompt_limit}, gen_length={args.gen_length} from "
-          f"{gen_source}, max_seq_len={args.max_seq_len}, chat_template={chat}) "
+          f"(prompt_limit={prompt_limit}, gen_length={args.gen_length}, max_seq_len={args.max_seq_len}, chat_template={chat}) "
           f"-> {out}", flush=True)
     return 0
 

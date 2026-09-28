@@ -5,17 +5,20 @@ from __future__ import annotations
 import argparse, glob, hashlib, json, random, sys, time
 from pathlib import Path
 
+import torch
+import torch.nn.functional as F
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from ask_dllm import (CustomCache, PromptUtilityStudent, StudentConfig,  # noqa: E402
+                      detect_family, load_model)
+from ask_dllm.dream_decoding import (  # noqa: E402
+    DreamDecoding, add_dream_arguments, require_matching_decoding)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    from future_dllm.dream_decoding import add_dream_arguments
     add_dream_arguments(p)
     p.add_argument("--model", required=True,
                    help="the checkpoint the teacher labels were extracted with. "
@@ -23,7 +26,7 @@ def parse_args():
                         "forward has to reproduce the hidden states the selection "
                         "was made from, so a different model trains on states "
                         "deployment never sees")
-    p.add_argument("--teacher-root", default=str(REPO_ROOT / "artifacts/teacher_per_head/samsum"),
+    p.add_argument("--teacher-root", required=True,
                    help="comma-separated for mixed-domain training: val is split "
                         "per domain and the checkpoint is chosen on the domain "
                         "macro average, so a block-heavy domain cannot own it")
@@ -110,13 +113,10 @@ def main():
     process_started = time.time()
     args = parse_args()
     if args.max_seq_len is None:
-        from future_dllm import detect_family
         args.max_seq_len = 2048 if detect_family(args.model) == "dream" else 4096
     if args.max_seq_len < 1:
         raise SystemExit("--max-seq-len must be positive")
     torch.manual_seed(args.seed); random.seed(args.seed)
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from future_dllm import CustomCache, load_model
 
     model, backend = load_model(args.model, max_seq_len=args.max_seq_len,
                                 block_length=args.block_length, keep_ratio=1.0)
@@ -129,7 +129,6 @@ def main():
     print(f"backend={backend.name} layers={L} hidden={H}", flush=True)
     decoding = None
     if backend.name == "dream":
-        from future_dllm.dream_decoding import DreamDecoding, require_matching_decoding
         decoding = DreamDecoding.from_args(args).metadata()
 
     def read_teacher(path):
@@ -137,9 +136,6 @@ def main():
         if decoding is not None:
             require_matching_decoding(shard.get("decoding"), decoding, path)
         return shard
-
-    CustomCache.capture_layer_hidden_states = (
-        lambda self, layer_id, hidden: self.layer_hidden_states.__setitem__(layer_id, hidden))
 
     roots = [r for r in args.teacher_root.split(",") if r]
     shard_caps = [int(c) for c in args.max_shards.split(",")] if args.max_shards else []
@@ -207,10 +203,8 @@ def main():
         raise SystemExit(f"teacher labels carry {attn_heads} heads but "
                          f"{backend.name} has {backend.kv_heads} KV heads")
 
-    from future_dllm import PromptUtilityStudent, StudentConfig
-    student_cfg = StudentConfig(layer_count=L, hidden_dim=H, proj_dim=args.proj_dim,
-                                mlp_dim=args.mlp_dim, heads=("score",),
-                                attn_heads=attn_heads)
+    student_cfg = StudentConfig(attn_heads=attn_heads, layer_count=L, hidden_dim=H,
+                                proj_dim=args.proj_dim, mlp_dim=args.mlp_dim)
     student = PromptUtilityStudent(student_cfg).to(device).float()
     opt = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=0.01)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -225,7 +219,7 @@ def main():
                "max_seq_len": args.max_seq_len,
                "lambda_list": args.lambda_list,
                "teacher_roots": roots,
-               "teacher_kind": teacher_kind, "attn_heads": K,
+               "teacher_kind": teacher_kind,
                "max_shards": dict(zip(datasets, shard_caps)) if shard_caps else {}},
               open(out_dir / "meta.json", "w"), indent=2)
 
@@ -265,8 +259,8 @@ def main():
                 f"--max-seq-len {args.max_seq_len}; use a matching student limit"
             )
         x = record["x_at_block_start"].unsqueeze(0).to(device)
-        cache = CustomCache(n_layers=L, device=device, keep_ratio=1.0)
-        cache.layer_hidden_states = {}
+        cache = CustomCache(n_layers=L, device=device, keep_ratio=1.0,
+                            capture_hidden_states=True)
         model(x, window_start(record), 1, cache)
         return cache.layer_hidden_states
 
@@ -279,8 +273,7 @@ def main():
         total, recalls, agreements, label_agreements = 0.0, [], [], []
         for l in range(L):
             h = hidden[l].float()
-            pred = student.forward_layer(l, h, cand, head="score",
-                                         block_indices=blk).squeeze(0)
+            pred = student.forward_layer(l, h, cand, blk).squeeze(0)
             tgt = label[l]
             rows_t = tgt if tgt.dim() == 2 else tgt.unsqueeze(0)
             rows_p = pred if pred.dim() == 2 else pred.unsqueeze(0)
@@ -343,17 +336,11 @@ def main():
               f"val recall macro {score:.4f} [{detail}]{head_line} | "
               f"{(time.time()-started)/60:.1f}min", flush=True)
         epoch_dir = out_dir / f"checkpoint-epoch-{epoch:02d}"
-        epoch_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({k: v.cpu() for k, v in student.state_dict().items()},
-                   epoch_dir / "pytorch_model.bin")
+        student.save(epoch_dir)
         torch.save(opt.state_dict(), epoch_dir / "optimizer.pt")
         if decoding is not None:
             with open(epoch_dir / "decoding.json", "w") as fh:
                 json.dump(decoding, fh, indent=2)
-        json.dump({"layer_count": L, "hidden_dim": H, "proj_dim": args.proj_dim,
-                   "mlp_dim": args.mlp_dim, "heads": ["score"],
-                   "attn_heads": attn_heads},
-                  open(epoch_dir / "config.json", "w"))
         json.dump({"epoch": epoch, "val_recall": score,
                    "val_recall_per_dataset": means},
                   open(epoch_dir / "trainer_state.json", "w"), indent=2)
@@ -361,18 +348,10 @@ def main():
         if score > best:
             best = score
             ckpt = out_dir / "checkpoint-best"
-            ckpt.mkdir(parents=True, exist_ok=True)
+            student.save(ckpt)
             if decoding is not None:
                 with open(ckpt / "decoding.json", "w") as fh:
                     json.dump(decoding, fh, indent=2)
-            torch.save({k: v.cpu() for k, v in student.state_dict().items()},
-                       ckpt / "pytorch_model.bin")
-            json.dump({"layer_count": L, "hidden_dim": H, "proj_dim": args.proj_dim,
-                       "mlp_dim": args.mlp_dim, "heads": ["score"],
-                       "attn_heads": attn_heads},
-                      open(ckpt / "config.json", "w"))
-            json.dump({"blk": student.block_proj_norms()},
-                      open(out_dir / "block_proj_norms.json", "w"), indent=2)
             json.dump({"val_recall": score, "val_recall_per_dataset": means,
                        "epoch": epoch, "datasets": datasets, "kv_heads": K,
                        "head_overlap_pred": sum(agree)/len(agree) if agree else None,

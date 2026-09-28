@@ -16,9 +16,7 @@ def shift_logits(logits):
 def generate(model, prompt, steps=None, gen_length=128, block_length=32,
              temperature=0.2, cfg_scale=0., remasking=None,
              mask_id=MASK_ID, cache_scorer=None, *, alg="entropy", top_p=0.95,
-             top_k=None, alg_temp=None, eps=1e-3, eviction_method="student",
-             on_block_complete=None, on_step=None, oracle_reduce=None,
-             current_reduce=None):
+             top_k=None, alg_temp=None, eps=1e-3, on_block_complete=None):
     if cfg_scale != 0 or remasking is not None:
         raise ValueError("Dream uses alg/temperature/top_p, not LLaDA cfg_scale/remasking")
     if prompt.ndim != 2 or prompt.shape[0] != 1 or prompt.shape[1] < 1:
@@ -27,14 +25,8 @@ def generate(model, prompt, steps=None, gen_length=128, block_length=32,
         raise ValueError("block_length must be positive and match model.config.block_len")
     if gen_length < 1 or gen_length % block_length:
         raise ValueError("gen_length must be positive and divisible by block_length")
-    if eviction_method not in ("student", "current", "sparse", "oracle"):
-        raise ValueError("eviction_method must be student, current, sparse or oracle")
-    if (oracle_reduce is not None) != (eviction_method == "oracle"):
-        raise ValueError("oracle_reduce and eviction_method='oracle' go together")
-    if (current_reduce is not None) != (eviction_method == "current"):
-        raise ValueError("current_reduce and eviction_method='current' go together")
-    if model.config.keep_ratio < 1 and eviction_method == "student" and cache_scorer is None:
-        raise ValueError("student eviction requires a scorer")
+    if model.config.keep_ratio < 1 and cache_scorer is None:
+        raise ValueError("keep_ratio < 1 requires a student scorer")
 
     settings = DreamDecoding(alg=alg, temperature=temperature, top_p=top_p,
                              steps=DEFAULT_DREAM_STEPS if steps is None else steps, eps=eps,
@@ -69,8 +61,6 @@ def generate(model, prompt, steps=None, gen_length=128, block_length=32,
                     _, x0 = sample_tokens(logits[:, bs:be], temperature=temperature,
                                           top_p=top_p, top_k=top_k)
                     x[:, bs] = x0[:, 0]
-                    if on_step is not None:
-                        on_step(x, block_index, i)
                     continue
 
                 if cache_state == 1:
@@ -102,57 +92,17 @@ def generate(model, prompt, steps=None, gen_length=128, block_length=32,
                     row_indices = torch.arange(model_input.size(0), device=model.device)
                     row_indices = row_indices.unsqueeze(1).expand_as(transfer_index)
                     x[:, bs:be][row_indices, transfer_index] = x_block[row_indices, transfer_index]
-                if on_step is not None:
-                    on_step(x, block_index, i)
 
-        if oracle_reduce is None:
-            cache = CustomCache(
-                n_layers=model.config.num_hidden_layers, device=model.device,
-                keep_ratio=model.config.keep_ratio, cache_scorer=cache_scorer,
-                prompt_length=prompt_len, generation_length=gen_length,
-                eviction_method=eviction_method, current_reduce=current_reduce,
-                baseline_order=True)
-            cache.collect_pool = on_block_complete is not None
-            if cache.collect_pool and model.config.keep_ratio != 1.0:
-                raise ValueError("teacher collection requires keep_ratio=1.0")
-            step_block(cache)
-        else:
-            cache = _oracle_block(model, x, bs, be, prompt_len, gen_length,
-                                  step_block, oracle_reduce)
+        cache = CustomCache(
+            n_layers=model.config.num_hidden_layers, device=model.device,
+            keep_ratio=model.config.keep_ratio, cache_scorer=cache_scorer,
+            order_full_cache=True)
+        cache.collect_pool = on_block_complete is not None
+        if cache.collect_pool and model.config.keep_ratio != 1.0:
+            raise ValueError("teacher collection requires keep_ratio=1.0")
+        step_block(cache)
 
         if on_block_complete is not None:
             on_block_complete(x, cache, block_index, bs, selection_input)
     return x
 
-
-def _oracle_block(model, x, bs, be, prompt_len, gen_length, step_block, reduce):
-    row_reduce, group_reduce, per_head = reduce
-    n_layers = model.config.num_hidden_layers
-    masked_block = x[:, bs:be].clone()
-
-    full = CustomCache(n_layers=n_layers, device=model.device, keep_ratio=1.0,
-                       prompt_length=prompt_len, generation_length=gen_length,
-                       eviction_method="sparse", baseline_order=True)
-    full.collect_pool = True
-    step_block(full)
-
-    full.capture_rows = True
-    full.capture_per_head = per_head
-    full.group_reduce = group_reduce
-    model(input_ids=x[:, bs:be], position_offset=bs, cache_state=2,
-          customcache=full, attention_mask="full", position_ids=None)
-    full.capture_rows = False
-    axis = 1 if per_head else 0
-    label = {layer: (full.pending_rows[layer].amax(axis) if row_reduce == "max"
-                     else full.pending_rows[layer].mean(axis))
-             for layer in range(n_layers)}
-    full.pending_rows.clear()
-
-    x[:, bs:be] = masked_block
-    cache = CustomCache(n_layers=n_layers, device=model.device,
-                        keep_ratio=model.config.keep_ratio,
-                        prompt_length=prompt_len, generation_length=gen_length,
-                        eviction_method="oracle", baseline_order=True)
-    cache.oracle_label = label
-    step_block(cache)
-    return cache

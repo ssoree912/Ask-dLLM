@@ -1,9 +1,9 @@
 from dataclasses import asdict, dataclass
 import hashlib
-import os
 import math
 
 
+# Stored in Dream teacher shards and student checkpoints; changing it invalidates them.
 DECODER_VERSION = "sparse_dllm_dream_v1"
 DEFAULT_DREAM_STEPS = 512
 
@@ -55,30 +55,12 @@ def add_dream_arguments(parser):
                             default=getattr(defaults, name))
 
 
-SAMPLING_KEYS = ("temperature", "top_p", "top_k", "alg_temp")
-DRIFT_ENV = "FUTURE_DLLM_ALLOW_SAMPLING_DRIFT"
-
-
 def require_matching_decoding(saved, expected, source):
-    if saved == expected:
-        return
-    if saved is not None and os.environ.get(DRIFT_ENV) == "1":
-        keys = set(saved) | set(expected)
-        structural = sorted(k for k in keys
-                            if k not in SAMPLING_KEYS and saved.get(k) != expected.get(k))
-        if not structural:
-            drift = {k: f"{saved.get(k)}->{expected.get(k)}" for k in SAMPLING_KEYS
-                     if saved.get(k) != expected.get(k)}
-            print(f"[future_dllm] {DRIFT_ENV}=1: running {source} under different "
-                  f"sampling than it was built with ({drift}). The reveal schedule "
-                  "(alg/steps) matches; treat the result as a transfer test, not a "
-                  "like-for-like number.", flush=True)
-            return
-    raise ValueError(
-        f"{source}: Dream decoding metadata is missing or mismatched. "
-        "Use labels/checkpoints from this decoding configuration in a new "
-        f"artifact directory. expected={expected}, found={saved}"
-    )
+    if saved != expected:
+        raise ValueError(
+            f"{source}: Dream decoding metadata is missing or mismatched. "
+            "Use labels/checkpoints built with this decoding configuration. "
+            f"expected={expected}, found={saved}")
 
 
 def sample_seed(seed, key):

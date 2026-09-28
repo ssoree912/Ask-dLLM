@@ -34,7 +34,7 @@ def detect_family(model_path: str | Path) -> str:
         return "llada"
     raise SystemExit(
         f"unsupported model_type {model_type!r} in {config_path}; "
-        "future_dllm supports LLaDA and Dream checkpoints"
+        "Ask-dLLM supports LLaDA and Dream checkpoints"
     )
 
 
