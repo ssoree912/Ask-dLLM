@@ -1,4 +1,4 @@
-name: future-dllm
+name: ask-dllm
 channels: [conda-forge]
 dependencies:
   - python=3.10
