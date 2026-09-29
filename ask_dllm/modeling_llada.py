@@ -1011,7 +1011,6 @@ class LLaDAModel(nn.Module):
             )
         if init_params and self.config.init_device != "meta":
             self.reset_parameters()
-        self.__num_fwd_flops: Optional[int] = None
 
         if self.config.alibi:
             get_causal_attention_bias(self.__cache, config.max_sequence_length, _non_meta_init_device(config))

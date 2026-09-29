@@ -110,7 +110,6 @@ def load_shard(path, attempts=3):
 
 
 def main():
-    process_started = time.time()
     args = parse_args()
     if args.max_seq_len is None:
         args.max_seq_len = 2048 if detect_family(args.model) == "dream" else 4096
@@ -224,7 +223,7 @@ def main():
               open(out_dir / "meta.json", "w"), indent=2)
 
     start_epoch = 0
-    best, run_started = -1.0, time.time()
+    best = -1.0
     if args.resume:
         epoch_dirs = []
         for path in out_dir.glob("checkpoint-epoch-*"):
@@ -309,7 +308,7 @@ def main():
 
     for epoch in range(start_epoch, args.epochs):
         student.train(); random.shuffle(train_shards)
-        started, losses = time.time(), []
+        losses = []
         for n, (_, path) in enumerate(train_shards):
             for record in read_teacher(path)["blocks"]:
                 losses.append(step(record, True)[0])
@@ -333,8 +332,7 @@ def main():
             head_line = (f" | head overlap@0.2 pred {sum(agree)/len(agree):.3f} "
                          f"label {sum(agree_label)/len(agree_label):.3f}")
         print(f"epoch {epoch}: loss {sum(losses)/len(losses):.4f} | "
-              f"val recall macro {score:.4f} [{detail}]{head_line} | "
-              f"{(time.time()-started)/60:.1f}min", flush=True)
+              f"val recall macro {score:.4f} [{detail}]{head_line}", flush=True)
         epoch_dir = out_dir / f"checkpoint-epoch-{epoch:02d}"
         student.save(epoch_dir)
         torch.save(opt.state_dict(), epoch_dir / "optimizer.pt")
@@ -360,12 +358,6 @@ def main():
                       open(out_dir / "best.json", "w"))
             print(f"  saved (best {best:.4f})", flush=True)
     print(f"done. best val recall {best:.4f} -> {out_dir}/checkpoint-best", flush=True)
-    print(f"cost: shards={len(train_shards) + len(val_shards)} epochs={args.epochs} "
-          f"train_h={(time.time() - run_started) / 3600:.4f} "
-          f"process_h={(time.time() - process_started) / 3600:.4f} "
-          f"peak_alloc_gib={torch.cuda.max_memory_allocated() / 2**30:.2f} "
-          f"peak_reserved_gib={torch.cuda.max_memory_reserved() / 2**30:.2f}",
-          flush=True)
     return 0
 
 

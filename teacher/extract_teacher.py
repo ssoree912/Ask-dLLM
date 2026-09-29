@@ -6,7 +6,6 @@ import argparse
 import glob
 import os
 import sys
-import time
 from pathlib import Path
 
 import torch
@@ -224,7 +223,6 @@ def collect_dream(model, prompt_ids, args, backend):
 
 
 def main():
-    process_started = time.time()
     args = parse_args()
 
     model, backend = load_model(args.model, max_seq_len=args.max_seq_len,
@@ -253,7 +251,7 @@ def main():
     if not shards:
         raise SystemExit(f"no prompt shards under {args.shard_root}/{args.dataset} "
                          f"- run teacher/build_prompt_shards.py first")
-    started, added = time.time(), 0
+    added = 0
     for i, path in enumerate(shards):
         target = out / Path(path).name
         src = torch.load(path, map_location="cpu", weights_only=False)
@@ -311,15 +309,9 @@ def main():
         torch.save(payload, temporary)
         os.replace(temporary, target)
         if (i + 1) % 10 == 0:
-            print(f"{i + 1}/{len(shards)}  {(time.time() - started) / (i + 1):.1f}s/sample",
+            print(f"{i + 1}/{len(shards)}",
                   flush=True)
     print(f"done: {len(list(out.glob('*.pt')))} shards total, {added} new -> {out}",
-          flush=True)
-    print(f"cost: dataset={args.dataset} generated={added} "
-          f"generate_h={(time.time() - started) / 3600:.4f} "
-          f"process_h={(time.time() - process_started) / 3600:.4f} "
-          f"peak_alloc_gib={torch.cuda.max_memory_allocated() / 2**30:.2f} "
-          f"peak_reserved_gib={torch.cuda.max_memory_reserved() / 2**30:.2f}",
           flush=True)
     return 0
 

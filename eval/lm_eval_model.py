@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import List, Tuple
 
@@ -51,7 +50,6 @@ class AskDLLM(HFLM):
         dream_steps: int = 512,
         dream_seed: int = 0,
         resume: str = "",
-        show_speed: bool = True,
         **kwargs,
     ):
         family = detect_family(pretrained)
@@ -60,7 +58,6 @@ class AskDLLM(HFLM):
             2048 if family == "dream" else 4096)
         self._max_prompt_len = self._max_seq_len
         self._keep_ratio = float(keep_ratio)
-        self._show_speed = bool(show_speed)
         self._dream_seed = int(dream_seed)
         self._resume_path = str(resume)
         if not 0.0 < self._keep_ratio <= 1.0:
@@ -163,9 +160,6 @@ class AskDLLM(HFLM):
                   f"{len(done)} answers on disk", flush=True)
 
         results = []
-        measured_seconds = 0.0
-        measured_tokens = 0
-        measured_answers = 0
         bar = tqdm(total=len(requests), disable=(disable_tqdm or self.rank != 0),
                    desc="ask_dllm generate_until")
         for request in requests:
@@ -193,18 +187,13 @@ class AskDLLM(HFLM):
                 [context], truncation=self.truncation,
                 left_truncate_len=prompt_limit)
 
-            started = time.perf_counter()
             out = self._call_generate(context_enc, gen_kwargs, gen_length)
-            elapsed = time.perf_counter() - started
             text = self.tokenizer.decode(out[0, context_enc.shape[1]:],
                                          skip_special_tokens=True)
             for term in gen_kwargs.get("until") or []:
                 if term:
                     text = text.split(term)[0]
             results.append(text)
-            measured_seconds += elapsed
-            measured_tokens += len(self.tokenizer.encode(text, add_special_tokens=False))
-            measured_answers += 1
             if store is not None:
                 store.write(json.dumps({"key": key, "text": text}) + "\n")
                 store.flush()
@@ -213,11 +202,4 @@ class AskDLLM(HFLM):
         bar.close()
         if store is not None:
             store.close()
-        if self._show_speed and measured_answers:
-            print(
-                f"[ask_dllm] generated {measured_answers} answers, "
-                f"{measured_tokens} decoded tokens in {measured_seconds:.1f}s "
-                f"({measured_tokens / measured_seconds:.2f} tok/s)",
-                flush=True,
-            )
         return results
