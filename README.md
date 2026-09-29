@@ -1,11 +1,5 @@
 # Ask-dLLM
 
-KV cache eviction for diffusion LLMs, ranking cache entries by what the completed answer needs.
-
-A lightweight student reads each layer's hidden states and predicts, per KV head, how much
-attention the finished block will pay to every cached token. At decode time the cache keeps
-only the top `keep_ratio` entries the student ranks highest. The student is trained on
-teacher labels: the attention the fully decoded block actually paid to each candidate.
 
 Models: [LLaDA-8B-Instruct](https://huggingface.co/GSAI-ML/LLaDA-8B-Instruct) /
 [Dream-v0-Instruct-7B](https://huggingface.co/Dream-org/Dream-v0-Instruct-7B).
