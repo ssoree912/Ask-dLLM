@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import argparse, glob, hashlib, json, random, sys, time
+import argparse, glob, json, random, sys, time
 from pathlib import Path
 
 import torch
@@ -30,10 +30,7 @@ def parse_args():
                    help="comma-separated for mixed-domain training: val is split "
                         "per domain and the checkpoint is chosen on the domain "
                         "macro average, so a block-heavy domain cannot own it")
-    p.add_argument("--output-dir", default="",
-                   help="default: artifacts/ckpts/<auto name>, see checkpoint_name()")
-    p.add_argument("--name", default="",
-                   help="override just the directory name under artifacts/ckpts")
+    p.add_argument("--output-dir", required=True)
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--proj-dim", type=int, default=256)
@@ -53,8 +50,6 @@ def parse_args():
                         "N prompts of each domain, 0 = all. The cut is taken before "
                         "the val split, "
                         "so val stays the same fraction of what is used.")
-    p.add_argument("--resume", action="store_true",
-                   help="resume from the latest checkpoint-epoch-* under the output directory")
     return p.parse_args()
 
 
@@ -70,25 +65,6 @@ def recall_grid(pred, target, ratios=(0.05, 0.1, 0.2, 0.3, 0.5)):
         mark.scatter_(-1, t.topk(k, dim=-1).indices, True)
         out.append(mark.gather(-1, chosen).sum(-1).float().mean() / k)
     return float(sum(out) / len(out))
-
-
-def head_agreement(pred, ratio=0.2):
-    if pred.ndim == 1 or pred.shape[0] < 2:
-        return None
-    k = max(1, int(pred.shape[-1] * ratio))
-    sets = [set(row.tolist()) for row in torch.topk(pred, k, dim=-1).indices]
-    pairs = [len(a & b) / k for i, a in enumerate(sets) for b in sets[i + 1:]]
-    return sum(pairs) / len(pairs)
-
-
-def checkpoint_name(datasets, counts, epochs, lr):
-    tag = hashlib.sha1(",".join(sorted(datasets)).encode()).hexdigest()[:6]
-    lr_text = f"{lr:g}"
-    if "e" not in lr_text and lr < 0.01:
-        lr_text = f"{lr:.1e}".replace(".0e", "e")
-    lr_text = lr_text.replace("e-0", "e-")
-    return (f"{len(datasets)}ds_{'-'.join(str(c) for c in counts)}_e{epochs}"
-            f"_lr{lr_text}_blk_{tag}")
 
 
 def window_start(record):
@@ -174,33 +150,20 @@ def main():
 
     if len(kinds) != 1 or len(label_heads) > 1:
         raise SystemExit(f"teacher roots disagree on the label: kinds={sorted(kinds)} "
-                         f"heads={sorted(label_heads)}; train one kind at a time")
+                         f"heads={sorted(label_heads)}")
     teacher_kind = sorted(kinds)[0]
-    per_head = "_per_head" in teacher_kind
-    K = sorted(label_heads)[0] if label_heads else None
 
     counts = [sum(1 for n, _ in train_shards + val_shards if n == d) for d in datasets]
-    out_dir = Path(args.output_dir) if args.output_dir else (
-        REPO_ROOT / "artifacts" / "ckpts" /
-        (args.name or checkpoint_name(datasets, counts, args.epochs, args.lr)))
+    out_dir = Path(args.output_dir)
     print(f"checkpoint -> {out_dir}", flush=True)
 
     probe = load_shard(train_shards[0][1])["blocks"][0]["label_final_rowmax"]
-    attn_heads = int(probe.shape[1]) if probe.dim() == 3 else 1
-    print(f"teacher labels: {tuple(probe.shape)} -> attn_heads={attn_heads}", flush=True)
-    if K is None:
-        K = attn_heads
-    elif attn_heads != K:
-        raise SystemExit(f"shard metadata says {K} label heads but the label "
-                         f"tensor has {attn_heads}; the root is inconsistent")
-    if per_head != (K > 1):
-        raise SystemExit(f"teacher_kind={teacher_kind} but the label carries "
-                         f"{K} head(s)")
-    print(f"teacher_kind={teacher_kind} scorer emits {K} score(s) per candidate"
-          f"{' (per KV head)' if per_head else ' (head-averaged)'}", flush=True)
-    if per_head and attn_heads != backend.kv_heads:
-        raise SystemExit(f"teacher labels carry {attn_heads} heads but "
-                         f"{backend.name} has {backend.kv_heads} KV heads")
+    if probe.dim() != 3 or probe.shape[1] != backend.kv_heads:
+        raise SystemExit(f"teacher labels have shape {tuple(probe.shape)}; expected "
+                         f"(layers, {backend.kv_heads} KV heads, candidates)")
+    attn_heads = K = int(probe.shape[1])
+    print(f"teacher_kind={teacher_kind}: {K} scores per candidate (one per KV head)",
+          flush=True)
 
     student_cfg = StudentConfig(attn_heads=attn_heads, layer_count=L, hidden_dim=H,
                                 proj_dim=args.proj_dim, mlp_dim=args.mlp_dim)
@@ -222,32 +185,7 @@ def main():
                "max_shards": dict(zip(datasets, shard_caps)) if shard_caps else {}},
               open(out_dir / "meta.json", "w"), indent=2)
 
-    start_epoch = 0
     best = -1.0
-    if args.resume:
-        epoch_dirs = []
-        for path in out_dir.glob("checkpoint-epoch-*"):
-            try:
-                epoch_dirs.append((int(path.name.rsplit("-", 1)[-1]), path))
-            except ValueError:
-                continue
-        if not epoch_dirs:
-            raise SystemExit(f"--resume requested but no epoch checkpoints under {out_dir}")
-        last_epoch, last_dir = max(epoch_dirs)
-        weights = last_dir / "pytorch_model.bin"
-        optimizer = last_dir / "optimizer.pt"
-        state = last_dir / "trainer_state.json"
-        student.load_state_dict(torch.load(weights, map_location=device, weights_only=True))
-        opt.load_state_dict(torch.load(optimizer, map_location=device, weights_only=True))
-        saved_state = json.loads(state.read_text())
-        start_epoch = int(saved_state["epoch"]) + 1
-        best_path = out_dir / "best.json"
-        if best_path.exists():
-            best = float(json.loads(best_path.read_text()).get("val_recall", -1.0))
-        if start_epoch >= args.epochs:
-            print(f"resume checkpoint is already at epoch {start_epoch}; requested epochs={args.epochs}", flush=True)
-            return 0
-        print(f"resuming from {last_dir} at epoch {start_epoch}", flush=True)
 
     @torch.no_grad()
     def features(record):
@@ -269,7 +207,7 @@ def main():
         ws = window_start(record)
         blk = torch.arange(ws, ws + window_length(record), device=device)
         label = record["label_final_rowmax"].float().to(device)
-        total, recalls, agreements, label_agreements = 0.0, [], [], []
+        total, recalls = 0.0, []
         for l in range(L):
             h = hidden[l].float()
             pred = student.forward_layer(l, h, cand, blk).squeeze(0)
@@ -298,15 +236,9 @@ def main():
                 opt.step()
             total += float(loss.detach())
             recalls.append(recall_grid(rows_p.detach(), rows_t))
-            agreement = head_agreement(rows_p.detach())
-            if agreement is not None:
-                agreements.append(agreement)
-                label_agreements.append(head_agreement(rows_t))
-        return (total / max(1, L), sum(recalls) / max(1, len(recalls)),
-                sum(agreements) / len(agreements) if agreements else None,
-                sum(label_agreements) / len(label_agreements) if label_agreements else None)
+        return total / max(1, L), sum(recalls) / max(1, len(recalls))
 
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(args.epochs):
         student.train(); random.shuffle(train_shards)
         losses = []
         for n, (_, path) in enumerate(train_shards):
@@ -316,33 +248,16 @@ def main():
                 print(f"  epoch {epoch} {n+1}/{len(train_shards)} "
                       f"loss {sum(losses[-120:])/max(1,len(losses[-120:])):.4f}", flush=True)
         student.eval()
-        per_ds, agree, agree_label = {}, [], []
+        per_ds = {}
         with torch.no_grad():
             for name, p in val_shards:
                 for r in read_teacher(p)["blocks"]:
-                    _, recall, a, al = step(r, False)
-                    per_ds.setdefault(name, []).append(recall)
-                    if a is not None:
-                        agree.append(a); agree_label.append(al)
+                    per_ds.setdefault(name, []).append(step(r, False)[1])
         means = {k: sum(v) / max(1, len(v)) for k, v in per_ds.items()}
         score = sum(means.values()) / max(1, len(means))
         detail = "  ".join(f"{k} {v:.3f}" for k, v in sorted(means.items()))
-        head_line = ""
-        if agree:
-            head_line = (f" | head overlap@0.2 pred {sum(agree)/len(agree):.3f} "
-                         f"label {sum(agree_label)/len(agree_label):.3f}")
         print(f"epoch {epoch}: loss {sum(losses)/len(losses):.4f} | "
-              f"val recall macro {score:.4f} [{detail}]{head_line}", flush=True)
-        epoch_dir = out_dir / f"checkpoint-epoch-{epoch:02d}"
-        student.save(epoch_dir)
-        torch.save(opt.state_dict(), epoch_dir / "optimizer.pt")
-        if decoding is not None:
-            with open(epoch_dir / "decoding.json", "w") as fh:
-                json.dump(decoding, fh, indent=2)
-        json.dump({"epoch": epoch, "val_recall": score,
-                   "val_recall_per_dataset": means},
-                  open(epoch_dir / "trainer_state.json", "w"), indent=2)
-        print(f"  saved epoch checkpoint -> {epoch_dir}", flush=True)
+              f"val recall macro {score:.4f} [{detail}]", flush=True)
         if score > best:
             best = score
             ckpt = out_dir / "checkpoint-best"
@@ -351,10 +266,7 @@ def main():
                 with open(ckpt / "decoding.json", "w") as fh:
                     json.dump(decoding, fh, indent=2)
             json.dump({"val_recall": score, "val_recall_per_dataset": means,
-                       "epoch": epoch, "datasets": datasets, "kv_heads": K,
-                       "head_overlap_pred": sum(agree)/len(agree) if agree else None,
-                       "head_overlap_label": (sum(agree_label)/len(agree_label)
-                                              if agree_label else None)},
+                       "epoch": epoch, "datasets": datasets, "kv_heads": K},
                       open(out_dir / "best.json", "w"))
             print(f"  saved (best {best:.4f})", flush=True)
     print(f"done. best val recall {best:.4f} -> {out_dir}/checkpoint-best", flush=True)

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -49,7 +47,6 @@ class AskDLLM(HFLM):
         dream_top_p: float = 0.95,
         dream_steps: int = 512,
         dream_seed: int = 0,
-        resume: str = "",
         **kwargs,
     ):
         family = detect_family(pretrained)
@@ -59,7 +56,6 @@ class AskDLLM(HFLM):
         self._max_prompt_len = self._max_seq_len
         self._keep_ratio = float(keep_ratio)
         self._dream_seed = int(dream_seed)
-        self._resume_path = str(resume)
         if not 0.0 < self._keep_ratio <= 1.0:
             raise ValueError("keep_ratio must be in (0, 1]")
         if self._block_len < 1 or self._max_seq_len < 1:
@@ -98,13 +94,6 @@ class AskDLLM(HFLM):
         tokenizer_mask = getattr(self.tokenizer, "mask_token_id", None)
         if tokenizer_mask is not None and int(tokenizer_mask) != self._backend.mask_id:
             raise RuntimeError("tokenizer and model mask token IDs disagree")
-        self._resume_identity = json.dumps({
-            "model": str(pretrained), "student": student_path,
-            "keep_ratio": self._keep_ratio, "block_len": self._block_len,
-            "max_seq_len": self._max_seq_len,
-            "decoding": self._dream_decoding.metadata() if self._dream_decoding else None,
-            "dream_seed": self._dream_seed,
-        }, sort_keys=True)
         print(f"[{family}] total={self._max_seq_len} block={self._block_len} "
               f"keep_ratio={self._keep_ratio}", flush=True)
 
@@ -143,33 +132,11 @@ class AskDLLM(HFLM):
     def generate_until(self, requests: List[Instance], disable_tqdm: bool = False) -> List[str]:
         from tqdm import tqdm
 
-        store_path = self._resume_path
-        done, store = {}, None
-        if store_path:
-            if os.path.exists(store_path):
-                with open(store_path) as fh:
-                    for line in fh:
-                        try:
-                            rec = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        done[rec["key"]] = rec["text"]
-            os.makedirs(os.path.dirname(store_path) or ".", exist_ok=True)
-            store = open(store_path, "a")
-            print(f"[ask_dllm] resume store: "
-                  f"{len(done)} answers on disk", flush=True)
-
         results = []
         bar = tqdm(total=len(requests), disable=(disable_tqdm or self.rank != 0),
                    desc="ask_dllm generate_until")
         for request in requests:
             context, raw_kwargs = request.args
-            key = hashlib.md5(
-                (context + repr(sorted(raw_kwargs.items())) + self._resume_identity).encode()).hexdigest()
-            if key in done:
-                results.append(done[key])
-                bar.update(1)
-                continue
             gen_kwargs = _generation_kwargs(raw_kwargs, self.max_gen_toks, self._dream_decoding)
             gen_length = int(gen_kwargs["gen_length"])
             if gen_length % self._block_len:
@@ -194,12 +161,6 @@ class AskDLLM(HFLM):
                 if term:
                     text = text.split(term)[0]
             results.append(text)
-            if store is not None:
-                store.write(json.dumps({"key": key, "text": text}) + "\n")
-                store.flush()
-                os.fsync(store.fileno())
             bar.update(1)
         bar.close()
-        if store is not None:
-            store.close()
         return results

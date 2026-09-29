@@ -26,7 +26,8 @@ class CustomCache:
     At cache_state 1 every layer stores its K/V and calls `filter_cache`, which drops
     the current block and evicts among the remaining candidates. At cache_state 2
     the layer attends to what is left. `capture_rows` records the block's attention
-    over the candidates, which is the teacher label.
+    over the candidates per KV head (query heads of a GQA group averaged), which
+    becomes the teacher label.
     """
 
     def __init__(self, n_layers: int, device: torch.device, keep_ratio: float = 1.0,
@@ -44,8 +45,6 @@ class CustomCache:
 
         self.collect_pool = False
         self.capture_rows = False
-        self.capture_per_head = True
-        self.group_reduce = "mean"
         self.pending_rows = {}
 
     def record_attention(self, layer_id: int, q: torch.Tensor, k: torch.Tensor) -> None:
@@ -60,15 +59,10 @@ class CustomCache:
         scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) / (q.size(-1) ** 0.5)
         weights = torch.softmax(scores, dim=-1)
         rows = weights[..., :k.size(-2) - q.size(-2)]
-        if self.capture_per_head:
-            if group != 1:
-                batch, _, n_rows, n_cols = rows.shape
-                grouped = rows.view(batch, kv_heads, group, n_rows, n_cols)
-                rows = (grouped.amax(dim=2) if self.group_reduce == "max"
-                        else grouped.mean(dim=2))
-            rows = rows.squeeze(0)
-        else:
-            rows = rows.mean(dim=1).squeeze(0)
+        if group != 1:
+            batch, _, n_rows, n_cols = rows.shape
+            rows = rows.view(batch, kv_heads, group, n_rows, n_cols).mean(dim=2)
+        rows = rows.squeeze(0)
         if layer_id in self.candidate_order:
             natural = torch.empty_like(rows)
             natural[..., self.candidate_order[layer_id]] = rows

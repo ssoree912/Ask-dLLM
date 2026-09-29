@@ -148,8 +148,6 @@ def main():
                    help="total token budget: LLaDA 4096, Dream 2048")
     p.add_argument("--gen-length", type=int, default=None,
                    help="default: GEN_LENGTH[dataset]")
-    p.add_argument("--chat-template", type=int, default=-1,
-                   help="-1 selects the dataset default (disabled for LongBench)")
     p.add_argument("--data-root", default=str(DATA))
     p.add_argument("--out-root", default=str(REPO_ROOT / "artifacts" / "prompt_shards"))
     args = p.parse_args()
@@ -171,7 +169,7 @@ def main():
             f"--max-seq-len {args.max_seq_len}"
         )
 
-    chat = (args.dataset not in RAW_TEXT) if args.chat_template < 0 else bool(args.chat_template)
+    chat = args.dataset not in RAW_TEXT
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tok.truncation_side = "left"
     out = Path(args.out_root) / args.dataset

@@ -1,11 +1,64 @@
 import torch
+import torch.distributions as dists
 import torch.nn.functional as F
 
 from .cache import CustomCache
 from .dream_decoding import DEFAULT_DREAM_STEPS, DreamDecoding
-from .generation_utils import sample_tokens
 
 MASK_ID = 151666
+
+
+def top_p_logits(logits, top_p=None):
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+    sorted_indices_to_remove = cumulative_probs > top_p
+    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    sorted_indices_to_remove[..., 0] = 0
+
+    mask = torch.zeros_like(logits, dtype=torch.bool, device=logits.device)
+    mask = mask.scatter_(-1, sorted_indices, sorted_indices_to_remove)
+    logits = logits.masked_fill(mask, torch.finfo(logits.dtype).min)
+    return logits
+
+
+def top_k_logits(logits, top_k=None):
+    top_k = min(top_k, logits.size(-1))
+    indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+    logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
+    return logits
+
+
+def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confidence=False, neg_entropy=False):
+
+    if temperature > 0:
+        logits = logits / temperature
+    if top_p is not None and top_p < 1:
+        logits = top_p_logits(logits, top_p)
+    if top_k is not None:
+        logits = top_k_logits(logits, top_k)
+    probs = torch.softmax(logits, dim=-1)
+
+    if temperature > 0:
+        try:
+            x0 = dists.Categorical(probs=probs).sample()
+            confidence = torch.gather(probs, -1, x0.unsqueeze(-1)).squeeze(-1)
+        except ValueError:
+            confidence, x0 = probs.max(dim=-1)
+    else:
+        confidence, x0 = probs.max(dim=-1)
+
+    if margin_confidence:
+        sorted_probs, _ = torch.sort(probs, dim=-1, descending=True)
+        top1_probs = sorted_probs[:, 0]
+        top2_probs = sorted_probs[:, 1]
+        confidence = top1_probs - top2_probs
+
+    if neg_entropy:
+        epsilon = 1e-10
+        log_probs = torch.log(probs + epsilon)
+        confidence = torch.sum(probs * log_probs, dim=-1)
+
+    return confidence, x0
 
 
 def shift_logits(logits):

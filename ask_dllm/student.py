@@ -27,7 +27,6 @@ class StudentLayer(nn.Module):
         super().__init__()
         if config.attn_heads < 1:
             raise ValueError(f"invalid attn_heads: {config.attn_heads}")
-        self.attn_heads = int(config.attn_heads)
         self.token_proj = nn.Linear(config.hidden_dim, config.proj_dim)
         self.block_proj = nn.Linear(config.hidden_dim, config.proj_dim)
         self.score_head = nn.Sequential(
@@ -43,10 +42,7 @@ class StudentLayer(nn.Module):
         block_proj = self.block_proj(block_state).unsqueeze(1).expand(
             -1, token_proj.shape[1], -1)
         fused = torch.cat([token_proj, block_proj, token_proj * block_proj], dim=-1)
-        scores = self.score_head(fused)
-        if self.attn_heads == 1:
-            return scores.squeeze(-1)
-        return scores.transpose(-2, -1)
+        return self.score_head(fused).transpose(-2, -1)
 
 
 class PromptUtilityStudent(nn.Module):

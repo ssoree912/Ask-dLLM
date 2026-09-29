@@ -69,7 +69,6 @@ def main():
     p.add_argument("--dream-top-p", type=float, default=0.95)
     p.add_argument("--dream-steps", type=int, default=512)
     p.add_argument("--dream-seed", type=int, default=0)
-    p.add_argument("--dry-run", action="store_true", help="write the config and stop")
     args = p.parse_args()
     if not 0.0 < args.keep_ratio <= 1.0:
         raise SystemExit("--keep-ratio must be in (0, 1]")
@@ -84,10 +83,9 @@ def main():
     config_path.parent.mkdir(parents=True, exist_ok=True)
     cfg.dump(str(config_path))
     print(f"OpenCompass config: {config_path}", flush=True)
-    if not args.dry_run:
-        from opencompass.cli.main import main as run_opencompass
-        sys.argv = [sys.argv[0], str(config_path), "--debug"]
-        run_opencompass()
+    from opencompass.cli.main import main as run_opencompass
+    sys.argv = [sys.argv[0], str(config_path), "--debug"]
+    run_opencompass()
 
 
 if __name__ == "__main__":

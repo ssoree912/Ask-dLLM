@@ -20,6 +20,9 @@ from ask_dllm.dream_decoding import (  # noqa: E402
 from ask_dllm.llada_generate import add_gumbel_noise, get_num_transfer_tokens  # noqa: E402
 from teacher.build_prompt_shards import GEN_LENGTH  # noqa: E402
 
+# Stored in every shard; train_student.py refuses to mix label kinds.
+TEACHER_KIND = "final_rowmax_per_head_groupmean"
+
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
@@ -37,22 +40,7 @@ def parse_args():
     p.add_argument("--block-length", type=int, default=32)
     p.add_argument("--max-seq-len", type=int, default=None,
                    help="total token budget; default LLaDA 4096, Dream 2048")
-    p.add_argument("--max-prompt-len", type=int, default=None,
-                   help="optional stricter prompt-only cap")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--label-row-reduce", choices=("max", "mean"), default="max",
-                   help="how the block's rows become one number per candidate. "
-                        "max is what the label shipped with: a candidate "
-                        "survives if any finished token needed it")
-    p.add_argument("--label-group-reduce", choices=("max", "mean"), default="mean",
-                   help="how the query heads sharing a KV entry are folded, on "
-                        "a GQA backend. Ignored when --per-head is off")
-    p.add_argument("--per-head", action=argparse.BooleanOptionalAction, default=True,
-                   help="label every attention head separately instead of "
-                        "averaging them. Needed for per-head eviction, where "
-                        "each head keeps its own top-k; costs H times the "
-                        "storage, so it writes its own teacher_kind and is "
-                        "meant for a separate --output-root")
     add_dream_arguments(p)
     args = p.parse_args()
 
@@ -79,9 +67,7 @@ def parse_args():
             f"generation length {args.gen_length} leaves no prompt space within "
             f"--max-seq-len {args.max_seq_len}"
         )
-    if args.max_prompt_len is not None and args.max_prompt_len < 1:
-        raise SystemExit("--max-prompt-len must be positive")
-    args.prompt_limit = min(available, args.max_prompt_len or available)
+    args.prompt_limit = available
     return args
 
 
@@ -135,15 +121,8 @@ def collect(model, prompt_ids, args, backend):
             step(i)
 
         cache.capture_rows = True
-        cache.capture_per_head = args.per_head
-        cache.group_reduce = args.label_group_reduce
         step(S - 1)
-        row_axis = 1 if cache.capture_per_head else 0
-        row_reduce = args.label_row_reduce
-        label = torch.stack([
-            reduce_rows(cache.pending_rows[layer], row_axis, row_reduce)
-            for layer in range(L)
-        ])
+        label = block_label(cache, L)
         cache.pending_rows.clear()
         cache.capture_rows = False
 
@@ -169,12 +148,10 @@ def collect(model, prompt_ids, args, backend):
 
 
 @torch.no_grad()
-def reduce_rows(rows: torch.Tensor, axis: int, how: str) -> torch.Tensor:
-    if how == "max":
-        return rows.max(dim=axis).values
-    if how == "mean":
-        return rows.mean(dim=axis)
-    raise ValueError(f"unknown row reduction: {how}")
+def block_label(cache, n_layers: int) -> torch.Tensor:
+    """Per KV head, the most attention any row of the finished block paid each candidate."""
+    return torch.stack([cache.pending_rows[layer].max(dim=1).values
+                        for layer in range(n_layers)])
 
 
 def collect_dream(model, prompt_ids, args, backend):
@@ -184,21 +161,13 @@ def collect_dream(model, prompt_ids, args, backend):
     prompt = prompt_ids[-args.prompt_limit:].to(model.device).unsqueeze(0)
     records = []
 
-    per_head = args.per_head
-    row_reduce = args.label_row_reduce
-    group_reduce = args.label_group_reduce
-
     def completed(x, cache, block_index, bs, selection_input):
         be = bs + args.block_length
         cache.capture_rows = True
-        cache.capture_per_head = per_head
-        cache.group_reduce = group_reduce
         model(input_ids=x[:, bs:be], position_offset=bs, cache_state=2,
               customcache=cache, attention_mask="full")
         cache.capture_rows = False
-        rows = [cache.pending_rows[layer] for layer in range(backend.n_layers)]
-        row_axis = 1 if per_head else 0
-        label = torch.stack([reduce_rows(row, row_axis, row_reduce) for row in rows])
+        label = block_label(cache, backend.n_layers)
         candidates = torch.cat([torch.arange(bs), torch.arange(be, x.shape[1])])
         record = {
             "block_index": block_index, "block_start": bs,
@@ -238,13 +207,6 @@ def main():
         decoding = DreamDecoding.from_args(args).metadata()
         print(f"decoding={decoding} seed={args.seed}", flush=True)
 
-    per_head = args.per_head
-    row_reduce = args.label_row_reduce
-    group_reduce = args.label_group_reduce
-    teacher_kind = f"final_row{row_reduce}" + ("_per_head" if per_head else "")
-    if per_head and group_reduce != "max":
-        teacher_kind += f"_group{group_reduce}"
-
     out = Path(args.output_root) / args.dataset
     out.mkdir(parents=True, exist_ok=True)
     shards = sorted(glob.glob(f"{args.shard_root}/{args.dataset}/*.pt"))[: args.n_samples]
@@ -264,9 +226,9 @@ def main():
                 require_matching_decoding(saved.get("decoding"), decoding, target)
                 if saved.get("seed") != args.seed:
                     raise ValueError(f"{target}: teacher seed differs; use a new output root")
-            if saved.get("teacher_kind") != teacher_kind:
+            if saved.get("teacher_kind") != TEACHER_KIND:
                 print(f"rebuilding teacher shard from "
-                      f"{saved.get('teacher_kind')!r} to {teacher_kind!r}: "
+                      f"{saved.get('teacher_kind')!r} to {TEACHER_KIND!r}: "
                       f"{target.name}", flush=True)
                 saved = None
             blocks = (saved.get("blocks") or []) if saved is not None else []
@@ -295,12 +257,12 @@ def main():
                    "prompt_limit": args.prompt_limit,
                    "gen_length": args.gen_length,
                    "max_seq_len": args.max_seq_len,
-                   "teacher_kind": teacher_kind,
+                   "teacher_kind": TEACHER_KIND,
                    "blocks": records}
-        if per_head and records:
+        if records:
             payload.update(
                 per_head_axis="kv_heads",
-                per_head_group_reduce=group_reduce,
+                per_head_group_reduce="mean",
                 num_label_heads=int(records[0]["label_final_rowmax"].shape[1]),
             )
         if decoding is not None:
@@ -309,8 +271,7 @@ def main():
         torch.save(payload, temporary)
         os.replace(temporary, target)
         if (i + 1) % 10 == 0:
-            print(f"{i + 1}/{len(shards)}",
-                  flush=True)
+            print(f"{i + 1}/{len(shards)}", flush=True)
     print(f"done: {len(list(out.glob('*.pt')))} shards total, {added} new -> {out}",
           flush=True)
     return 0

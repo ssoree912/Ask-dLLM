@@ -43,7 +43,6 @@ from transformers.utils import (
 from transformers import PretrainedConfig
 from .cache import CustomCache
 from .configuration_dream import DreamConfig
-from .generation_utils import DreamGenerationMixin, DreamGenerationConfig
 
 if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
@@ -483,56 +482,6 @@ class DreamPreTrainedModel(PreTrainedModel):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
-    @classmethod
-    def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
-        *model_args,
-        config: Optional[Union[PretrainedConfig, str, os.PathLike]] = None,
-        cache_dir: Optional[Union[str, os.PathLike]] = None,
-        ignore_mismatched_sizes: bool = False,
-        force_download: bool = False,
-        local_files_only: bool = False,
-        token: Optional[Union[str, bool]] = None,
-        revision: str = "main",
-        use_safetensors: Optional[bool] = None,
-        weights_only: bool = True,
-        **kwargs,
-    ):
-        _model = super().from_pretrained(
-            pretrained_model_name_or_path,
-            *model_args,
-            config=config,
-            cache_dir=cache_dir,
-            ignore_mismatched_sizes=ignore_mismatched_sizes,
-            force_download=force_download,
-            local_files_only=local_files_only,
-            token=token,
-            revision=revision,
-            use_safetensors=use_safetensors,
-            weights_only=weights_only,
-            **kwargs,
-        )
-        resume_download = kwargs.get("resume_download", None)
-        proxies = kwargs.get("proxies", None)
-        subfolder = kwargs.get("subfolder", "")
-        from_auto_class = kwargs.get("_from_auto", False)
-        from_pipeline = kwargs.get("_from_pipeline", None)
-        _model.generation_config = DreamGenerationConfig.from_pretrained(
-            pretrained_model_name_or_path,
-            cache_dir=cache_dir,
-            force_download=force_download,
-            resume_download=resume_download,
-            proxies=proxies,
-            local_files_only=local_files_only,
-            token=token,
-            revision=revision,
-            subfolder=subfolder,
-            _from_auto=from_auto_class,
-            _from_pipeline=from_pipeline,
-        )
-        return _model
-
 class DreamBaseModel(DreamPreTrainedModel):
 
     def __init__(self, config: DreamConfig):
@@ -673,7 +622,7 @@ class DreamBaseModel(DreamPreTrainedModel):
         )
 
 
-class DreamModel(DreamGenerationMixin, DreamPreTrainedModel):
+class DreamModel(DreamPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):

@@ -6,7 +6,6 @@
 # every other task runs through lm-eval. keep_ratio=1.0 disables eviction.
 #   LIMIT=N        evaluate the first N examples (per MMLU subject for mmlu)
 #   LOG_SAMPLES=1  keep per-sample lm-eval outputs
-#   RESUME=path    lm-eval answer store to resume an interrupted run from
 set -euo pipefail
 FAMILY="${1:?usage: eval.sh <llada|dream> <task> <keep_ratio> [checkpoint]}"
 TASK="${2:?specify a task}"
@@ -60,7 +59,6 @@ export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 
 MODEL_ARGS="pretrained=$MODEL,block_len=$BLOCK_LENGTH,keep_ratio=$KEEP,max_seq_len=$MAX_SEQ_LEN"
-MODEL_ARGS="$MODEL_ARGS,resume=${RESUME:-$RUN_DIR/resume.jsonl}"
 [ -n "$CKPT" ] && MODEL_ARGS="$MODEL_ARGS,student_path=$CKPT"
 if [ "$FAMILY" = dream ]; then
   MODEL_ARGS="$MODEL_ARGS,dream_alg=$DREAM_ALG,dream_temperature=$DREAM_TEMPERATURE"
